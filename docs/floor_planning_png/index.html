@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Floor 3 grid overlay</title>
+<style>
+  body { margin: 0; font: 14px system-ui, sans-serif; background: #eee; }
+  #bar { position: sticky; top: 0; z-index: 2; display: flex; gap: 14px; flex-wrap: wrap;
+         align-items: center; padding: 8px 12px; background: #fff; border-bottom: 1px solid #ccc; }
+  #bar input[type=number] { width: 70px; }
+  #bar button { padding: 4px 10px; font-size: 16px; cursor: pointer; }
+  #info { margin-left: auto; font-weight: 600; }
+  #wrap { overflow: hidden; }
+  svg { display: block; width: 100%; height: auto; background: #fff;
+        touch-action: none; cursor: grab; user-select: none; }
+  svg.panning { cursor: grabbing; }
+  .cell { fill: rgba(80,200,255,.10); stroke: #1ec8ff; stroke-width: 1;
+          vector-effect: non-scaling-stroke; cursor: pointer; outline: none; }
+  .cell:hover, .cell:focus { fill: rgba(80,200,255,.40); }
+  .cell.selected { fill: rgba(255,90,0,.45); stroke: #ff5a00; }
+  .label { fill: #111; text-anchor: middle; dominant-baseline: central;
+           pointer-events: none; font-family: Arial, sans-serif; }
+</style>
+</head>
+<body>
+
+<div id="bar">
+  <label>x0 <input type="number" id="x0"></label>
+  <label>y0 <input type="number" id="y0"></label>
+  <label>scale <input type="number" id="scale" step="0.1"></label>
+  <label><input type="checkbox" id="labels" checked> labels</label>
+  <label>PNG opacity <input type="range" id="opacity" min="0" max="1" step="0.05" value="1"></label>
+  <span>
+    <button id="zoomOut" title="Zoom out">&minus;</button>
+    <button id="zoomIn" title="Zoom in">+</button>
+    <button id="zoomReset" title="Reset view">Reset</button>
+    <span id="zoomLevel">100%</span>
+  </span>
+  <span id="info">Click a cell</span>
+</div>
+
+<div id="wrap">
+  <svg id="svg" xmlns="http://www.w3.org/2000/svg">
+    <image id="plan" href="f_03.png"></image>
+    <g id="grid"></g>
+    <g id="text"></g>
+  </svg>
+</div>
+
+<script>
+/* ============ PARAMETERS (edit these) ============ */
+const CONFIG = {
+  image: "f_01.png",
+  cellSizeM: 2,          // cell size in meters
+  firstColumnX: -4,      // left edge of column A in grid meters (A center = -3)
+  x0: 1350,              // pixel x of grid X = 0
+  y0: 265,               // pixel y of grid Z = 0
+  scale: 32.7,           // pixels per meter
+  flipX: true,           // plan shows columns running right to left
+  flipZ: false,
+  imageOpacity: 1,       // opacity of the PNG background (0 to 1)
+  maxZoom: 20,           // maximum zoom factor
+  zoomStep: 1.25,        // factor used by the + / - buttons and wheel notch
+  rows: {
+    1: [["A","O"]],
+    2: [["A","O"]],
+    3: [["A","R"]],
+    4: [["A","S"]],
+    5: [["A","S"]],
+    6: [["A","S"]],
+    7: [["A","L"],["O","S"]],
+    8: [["A","L"],["O","S"]],
+    9: [["P","S"]]
+  }
+};
+/* ================================================= */
+
+const NS = "http://www.w3.org/2000/svg";
+const $ = id => document.getElementById(id);
+const p = CONFIG;
+const svg = $("svg");
+let selected = null;
+
+/* ---------- cells ---------- */
+const cells = [];
+for (const [row, ranges] of Object.entries(p.rows)) {
+  for (const [a, b] of ranges) {
+    for (let c = a.charCodeAt(0) - 65; c <= b.charCodeAt(0) - 65; c++) {
+      cells.push({
+        id: String.fromCharCode(65 + c) + row,
+        x: p.firstColumnX + (c + 0.5) * p.cellSizeM,
+        z: (row - 1 + 0.5) * p.cellSizeM
+      });
+    }
+  }
+}
+
+function toPx(x, z) {
+  return [p.x0 + x * p.scale * (p.flipX ? -1 : 1),
+          p.y0 + z * p.scale * (p.flipZ ? -1 : 1)];
+}
+
+function draw() {
+  const grid = $("grid"), text = $("text");
+  grid.replaceChildren(); text.replaceChildren();
+  $("plan").style.opacity = p.imageOpacity;
+  const h = p.cellSizeM / 2;
+
+  for (const c of cells) {
+    const pts = [[-h,-h],[h,-h],[h,h],[-h,h]]
+      .map(([dx, dz]) => toPx(c.x + dx, c.z + dz).join(",")).join(" ");
+    const poly = document.createElementNS(NS, "polygon");
+    poly.setAttribute("points", pts);
+    poly.setAttribute("class", "cell" + (c.id === selected ? " selected" : ""));
+    poly.setAttribute("role", "button");
+    poly.setAttribute("tabindex", "0");
+    poly.setAttribute("aria-label", "Cell " + c.id);
+    poly.dataset.id = c.id;
+    grid.append(poly);
+
+    if ($("labels").checked) {
+      const [px, py] = toPx(c.x, c.z);
+      const t = document.createElementNS(NS, "text");
+      t.setAttribute("x", px); t.setAttribute("y", py);
+      t.setAttribute("class", "label");
+      t.setAttribute("font-size", p.scale * 0.5);
+      t.textContent = c.id;
+      text.append(t);
+    }
+  }
+}
+
+function select(id) {
+  if (!id) return;
+  selected = id;
+  const c = cells.find(c => c.id === id);
+  $("info").textContent = `${id}  (x=${c.x} m, z=${c.z} m)`;
+  draw();
+  document.dispatchEvent(new CustomEvent("cell-select", { detail: c }));
+}
+
+/* ---------- zoom & pan (viewBox based) ---------- */
+let full = { w: 1, h: 1 };          // image size
+let vb = { x: 0, y: 0, w: 1, h: 1 }; // current view
+
+function applyView() {
+  // keep the view inside the image
+  vb.x = Math.min(Math.max(vb.x, 0), full.w - vb.w);
+  vb.y = Math.min(Math.max(vb.y, 0), full.h - vb.h);
+  svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+  $("zoomLevel").textContent = Math.round(full.w / vb.w * 100) + "%";
+}
+
+// Zoom by `factor` keeping the point (clientX, clientY) fixed on screen
+function zoomAt(factor, clientX, clientY) {
+  const r = svg.getBoundingClientRect();
+  const fx = (clientX - r.left) / r.width;
+  const fy = (clientY - r.top) / r.height;
+  const newW = Math.min(full.w, Math.max(full.w / p.maxZoom, vb.w / factor));
+  const newH = newW * full.h / full.w;
+  vb.x += (vb.w - newW) * fx;
+  vb.y += (vb.h - newH) * fy;
+  vb.w = newW; vb.h = newH;
+  applyView();
+}
+
+function zoomCenter(factor) {
+  const r = svg.getBoundingClientRect();
+  // use the centre of the visible part of the svg
+  const cx = r.left + r.width / 2;
+  const top = Math.max(r.top, 0), bottom = Math.min(r.bottom, innerHeight);
+  zoomAt(factor, cx, (top + bottom) / 2);
+}
+
+function resetView() {
+  vb = { x: 0, y: 0, w: full.w, h: full.h };
+  applyView();
+}
+
+// Mouse wheel / trackpad
+svg.addEventListener("wheel", e => {
+  e.preventDefault();
+  const f = Math.pow(p.zoomStep, -e.deltaY / 100);
+  zoomAt(f, e.clientX, e.clientY);
+}, { passive: false });
+
+// Drag to pan, pinch to zoom
+const pointers = new Map();
+let dragMoved = false, pinchDist = 0, downPos = null;
+
+svg.addEventListener("pointerdown", e => {
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 1) { dragMoved = false; downPos = { x: e.clientX, y: e.clientY }; }
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+    dragMoved = true;
+  }
+});
+
+window.addEventListener("pointermove", e => {
+  const prev = pointers.get(e.pointerId);
+  if (!prev) return;
+  const cur = { x: e.clientX, y: e.clientY };
+
+  if (pointers.size === 2) {
+    pointers.set(e.pointerId, cur);
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    if (pinchDist > 0) zoomAt(d / pinchDist, (a.x + b.x) / 2, (a.y + b.y) / 2);
+    pinchDist = d;
+    return;
+  }
+
+  if (!dragMoved && Math.hypot(cur.x - downPos.x, cur.y - downPos.y) > 4) {
+    dragMoved = true;
+    svg.classList.add("panning");
+  }
+  if (dragMoved) {
+    const r = svg.getBoundingClientRect();
+    vb.x -= (cur.x - prev.x) * vb.w / r.width;
+    vb.y -= (cur.y - prev.y) * vb.h / r.height;
+    applyView();
+  }
+  pointers.set(e.pointerId, cur);
+});
+
+function endPointer(e) {
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinchDist = 0;
+  if (pointers.size === 0) svg.classList.remove("panning");
+}
+window.addEventListener("pointerup", endPointer);
+window.addEventListener("pointercancel", endPointer);
+
+// Cell selection (ignored after a drag)
+$("grid").addEventListener("click", e => {
+  if (dragMoved) { dragMoved = false; return; }
+  select(e.target.dataset.id);
+});
+$("grid").addEventListener("keydown", e => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); select(e.target.dataset.id); }
+});
+
+$("zoomIn").onclick = () => zoomCenter(p.zoomStep);
+$("zoomOut").onclick = () => zoomCenter(1 / p.zoomStep);
+$("zoomReset").onclick = resetView;
+
+/* ---------- controls ---------- */
+const bind = (id, key) => {
+  $(id).value = p[key];
+  $(id).oninput = e => { p[key] = +e.target.value; draw(); };
+};
+bind("x0", "x0"); bind("y0", "y0"); bind("scale", "scale");
+bind("opacity", "imageOpacity");
+$("labels").onchange = draw;
+
+/* ---------- load image ---------- */
+const img = new Image();
+img.onload = () => {
+  full = { w: img.naturalWidth, h: img.naturalHeight };
+  $("plan").setAttribute("width", full.w);
+  $("plan").setAttribute("height", full.h);
+  resetView();
+  draw();
+};
+img.onerror = () => $("info").textContent = "Could not load " + p.image;
+img.src = p.image;
+$("plan").setAttribute("href", p.image);
+</script>
+</body>
+</html>
