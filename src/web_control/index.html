@@ -1,72 +1,160 @@
 <!doctype html>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>LoRaWAN coverage test</title>
 <style>
-  body { font-family: sans-serif; max-width: 760px; margin: 8px auto; padding: 0 8px; }
-  fieldset { margin: 10px 0; }
-  label { display:block; margin:6px 0 2px; font-size:13px; color:#444; }
-  input[type=text], input[type=number], select { width:100%; box-sizing:border-box; padding:6px; font-family:monospace; }
-  .row { display:flex; gap:8px; flex-wrap:wrap; }
-  .row > div { flex:1 1 140px; }
-  button { padding:8px 12px; margin:4px 4px 4px 0; }
-  progress { width:100%; height:22px; }
-  #known div { margin: 4px 0; }
+  :root { --line:#cfd4da; --ok:#2e7d32; --err:#c62828; --busy:#1565c0; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; font-size: 16px; max-width: 640px; margin: 0 auto; padding: 8px 12px 32px; }
+  h1 { font-size: 18px; margin: 8px 0; }
+  label { display:block; margin:10px 0 3px; font-size:14px; color:#444; }
+  input[type=text], input[type=number], select { width:100%; padding:10px; font:16px monospace; border:1px solid #9aa0a6; border-radius:6px; background:#fff; }
+  input[aria-invalid=true] , select[aria-invalid=true] { border-color: var(--err); outline: 1px solid var(--err); }
+  button { min-height:44px; padding:8px 14px; font-size:16px; border:1px solid #9aa0a6; border-radius:8px; background:#f1f3f4; }
+  button:disabled { opacity:.45; }
+  button.primary { background:var(--ok); border-color:var(--ok); color:#fff; }
+  button.danger  { background:var(--err); border-color:var(--err); color:#fff; }
+  button.big { min-height:60px; font-size:20px; font-weight:600; }
+  .inline { display:flex; gap:8px; }
+  .inline > input { flex:1; min-width:0; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 10px; }
+  .grid2 .span2 { grid-column:1 / -1; }
+  .hint { font-size:13px; color:#555; margin-top:4px; }
+  .wide { width:100%; margin-top:8px; }
+  .stepper { display:flex; gap:8px; }
+  .stepper input { flex:1; min-width:0; text-align:center; font-size:28px; padding:8px; -moz-appearance:textfield; }
+  .stepper input::-webkit-inner-spin-button, .stepper input::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+  .stepper button { width:64px; font-size:28px; padding:0; }
+
+  .run { border:1px solid var(--line); border-radius:10px; padding:12px; margin:8px 0 12px; }
+  #loc { font-size:28px; text-align:center; letter-spacing:.2em; padding:12px; }
+  .btns { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:12px 0 8px; }
+  progress { width:100%; height:20px; }
+  #progText { font-size:14px; color:#555; }
+  #statusLine { margin-top:8px; padding:8px 10px; border-radius:6px; background:#f1f3f4; font-weight:600; min-height:38px; }
+  #statusLine.ok   { background:#e8f5e9; color:var(--ok); }
+  #statusLine.err  { background:#ffebee; color:var(--err); }
+  #statusLine.busy { background:#e3f2fd; color:var(--busy); }
+
+  details.sec { border:1px solid var(--line); border-radius:10px; margin:8px 0; }
+  details.sec > summary { list-style:none; cursor:pointer; position:relative; min-height:48px; padding:10px 36px 10px 12px; display:flex; flex-wrap:wrap; align-items:center; gap:2px 10px; }
+  details.sec > summary::-webkit-details-marker { display:none; }
+  details.sec > summary::after { content:'\25BE'; position:absolute; right:14px; top:12px; color:#555; }
+  details.sec[open] > summary::after { content:'\25B4'; }
+  .t { font-weight:600; }
+  .sum { flex-basis:100%; font-size:13px; color:#555; overflow-wrap:anywhere; }
+  .dirty { display:inline-block; font-size:12px; padding:1px 8px; border-radius:10px; background:#fff3e0; color:#e65100; }
+  .dirty[hidden] { display:none; }
+  .body { padding:0 12px 12px; }
+  .err { color:var(--err); font-size:14px; min-height:0; margin-top:8px; }
+  .err:empty { display:none; }
+  .save { width:100%; margin-top:12px; }
+
+  #known > div { display:flex; align-items:center; gap:8px; margin:6px 0; }
+  #known span { flex:1; overflow-wrap:anywhere; font-size:14px; }
   #log { background:#111; color:#0f0; padding:8px; min-height:160px; max-height:320px; overflow:auto; white-space:pre-wrap; font-size:12px; }
 </style>
 
-<h3>1. Bluetooth connection</h3>
-<button id="scan">Scan (choose from all devices)</button>
-<div style="margin-top:8px">
-  <input type="text" id="nameBox" placeholder="Device name or prefix, e.g. RAK.1A2B3C" style="width:65%">
-  <button id="byName">Connect by name</button>
+<h1>LoRaWAN coverage test</h1>
+
+<!-- ============ run area: the part used at every spot ============ -->
+<div class="run">
+  <label for="floor" style="margin-top:0">Floor level (0-12)</label>
+  <div class="stepper">
+    <button id="floorDown" type="button" aria-label="Floor down">&minus;</button>
+    <input type="number" id="floor" min="0" max="12" step="1" inputmode="numeric" placeholder="0-12" autocomplete="off">
+    <button id="floorUp" type="button" aria-label="Floor up">+</button>
+  </div>
+  <div class="err" id="floorErr"></div>
+  <label for="loc">Location ID (3 ASCII chars)</label>
+  <input type="text" id="loc" maxlength="3" placeholder="A12" autocapitalize="characters" autocomplete="off" spellcheck="false">
+  <div class="err" id="locErr"></div>
+  <div class="btns">
+    <button id="start" class="primary big" disabled>Start</button>
+    <button id="stop" class="danger big" disabled>Stop</button>
+  </div>
+  <progress id="bar" value="0" max="100"></progress>
+  <div id="progText">0 / 0</div>
+  <div id="statusLine" role="status" aria-live="polite">Not connected</div>
 </div>
-<div><b>Known devices</b></div>
-<div id="known">(none)</div>
-<button id="disc" disabled>Disconnect</button>
-<span id="status">not connected</span>
 
-<h3>2. Device keys (ABP)</h3>
-<fieldset>
-  <label>DevEUI (16 hex)</label><input type="text" id="deveui" maxlength="16" placeholder="0000000000000000">
-  <label>DevAddr (8 hex)</label><input type="text" id="devaddr" maxlength="8" placeholder="00000000">
-  <label>NetSKey (32 hex)</label><input type="text" id="nwkskey" maxlength="32">
-  <label>AppSKey (32 hex)</label><input type="text" id="appskey" maxlength="32">
-</fieldset>
-
-<h3>3. LoRa/LoRaWAN parameters</h3>
-<fieldset>
-  <div class="row">
-    <div><label>Region</label><select id="region"></select></div>
-    <div><label>TX power (AT+TXP index)</label><select id="txp"></select></div>
-    <div><label>SF</label><select id="sf"></select></div>
-    <div><label>BW (kHz)</label><select id="bw"></select></div>
-    <div><label>CR</label><select id="cr"></select></div>
+<!-- ============ 1. connection ============ -->
+<details class="sec" id="sec-conn" open>
+  <summary><span class="t">1. Bluetooth connection</span><span class="sum" id="sum-conn">Not connected</span></summary>
+  <div class="body">
+    <label style="margin-top:0">Known devices</label>
+    <div id="known">(none)</div>
+    <label for="nameBox">Device name or prefix</label>
+    <input type="text" id="nameBox" value="TTLab.CoverageTester" placeholder="e.g. TTLab.CoverageTester" autocomplete="off" spellcheck="false">
+    <div class="hint">Leave empty to list all nearby devices.</div>
+    <button id="scan" class="primary wide">Scan</button>
+    <button id="disc" class="wide" disabled>Disconnect</button>
   </div>
-</fieldset>
+</details>
 
-<h3>4. Test</h3>
-<fieldset>
-  <div class="row">
-    <div><label>Test configuration ID (0-255)</label><input type="number" id="cfgId" value="0" min="0" max="255"></div>
-    <div><label>Test sequence ID (0-255)</label><input type="number" id="seqId" value="0" min="0" max="255"></div>
-    <div><label>Location ID (3 ASCII chars)</label><input type="text" id="loc" maxlength="3" placeholder="A12"></div>
+<!-- ============ 2. keys ============ -->
+<details class="sec" id="sec-keys" open>
+  <summary><span class="t">2. Device keys (ABP)</span><span class="dirty" id="dirty-keys" hidden>unsaved changes</span><span class="sum" id="sum-keys"></span></summary>
+  <div class="body">
+    <label for="devaddr">DevAddr (8 hex)</label>
+    <input type="text" id="devaddr" maxlength="8" placeholder="00000000" autocapitalize="off" autocomplete="off" spellcheck="false">
+    <label for="nwkskey">NetSKey (32 hex)</label>
+    <input type="text" id="nwkskey" maxlength="32" autocapitalize="off" autocomplete="off" spellcheck="false">
+    <label for="appskey">AppSKey (32 hex)</label>
+    <input type="text" id="appskey" maxlength="32" autocapitalize="off" autocomplete="off" spellcheck="false">
+    <div class="err" id="err-keys"></div>
+    <button class="save" data-sec="keys">Save</button>
   </div>
-  <div class="row">
-    <div><label>Total TX packets (1-65535)</label><input type="number" id="total" value="20" min="1" max="65535"></div>
-    <div><label>Interval between packets (s)</label><input type="number" id="interval" value="10" min="1" max="3600"></div>
+</details>
+
+<!-- ============ 3. radio ============ -->
+<details class="sec" id="sec-radio" open>
+  <summary><span class="t">3. LoRa/LoRaWAN parameters</span><span class="dirty" id="dirty-radio" hidden>unsaved changes</span><span class="sum" id="sum-radio"></span></summary>
+  <div class="body">
+    <div class="grid2">
+      <div><label for="region">Region</label><select id="region"></select></div>
+      <div><label for="cr">CR</label><select id="cr"></select></div>
+      <div><label for="sf">SF</label><select id="sf"></select></div>
+      <div><label for="bw">BW (kHz)</label><select id="bw"></select></div>
+      <div class="span2">
+        <label for="txpDbm">TX power (dBm)</label>
+        <input type="number" id="txpDbm" value="16" min="2" max="16" step="1" inputmode="numeric">
+        <div class="hint" id="txpHint"></div>
+      </div>
+    </div>
+    <div class="err" id="err-radio"></div>
+    <button class="save" data-sec="radio">Save</button>
   </div>
-</fieldset>
+</details>
 
-<button id="start" disabled>Start</button>
-<button id="stop" disabled>Stop</button>
-<progress id="bar" value="0" max="100"></progress>
-<div id="progText">0 / 0</div>
+<!-- ============ 4. test setup ============ -->
+<details class="sec" id="sec-test" open>
+  <summary><span class="t">4. Test setup</span><span class="dirty" id="dirty-test" hidden>unsaved changes</span><span class="sum" id="sum-test"></span></summary>
+  <div class="body">
+    <div class="grid2">
+      <div><label for="cfgId">Config ID (0-255)</label><input type="number" id="cfgId" value="0" min="0" max="255" inputmode="numeric"></div>
+      <div><label for="seqId">Sequence ID (0-255)</label><input type="number" id="seqId" value="0" min="0" max="255" inputmode="numeric"></div>
+      <div><label for="total">Total packets (1-65535)</label><input type="number" id="total" value="20" min="1" max="65535" inputmode="numeric"></div>
+      <div><label for="interval">Interval (s)</label><input type="number" id="interval" value="10" min="1" max="3600" inputmode="numeric"></div>
+    </div>
+    <div class="err" id="err-test"></div>
+    <button class="save" data-sec="test">Save</button>
+  </div>
+</details>
 
-<h3>Raw AT command (debug)</h3>
-<input type="text" id="raw" placeholder="AT+VER=?" style="width:70%">
-<button id="rawSend" disabled>Send</button>
-
-<pre id="log"></pre>
+<!-- ============ debug ============ -->
+<details class="sec" id="sec-debug">
+  <summary><span class="t">Debug</span><span class="sum">Raw AT command and log</span></summary>
+  <div class="body">
+    <label for="raw">Raw AT command</label>
+    <div class="inline">
+      <input type="text" id="raw" placeholder="AT+VER=?" autocapitalize="characters" autocomplete="off" spellcheck="false">
+      <button id="rawSend" disabled>Send</button>
+    </div>
+    <label>Log</label>
+    <pre id="log"></pre>
+  </div>
+</details>
 
 <script>
 /* ================= constants ================= */
@@ -75,7 +163,10 @@ const RX  = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // phone -> device (write)
 const TX  = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // device -> phone (notify)
 const STORE_DEV = 'ble_known_devices';
 const STORE_CFG = 'lora_test_cfg';
+const STORE_NAME = 'ble_name_filter';
+const STORE_FLOOR = 'floor_level';
 const LORAWAN_PORT = 2;
+const FLOOR_MAX = 12;
 
 // RUI3 AT+BAND index. Verify against the RAK AT command manual.
 const REGIONS = [
@@ -89,6 +180,8 @@ const REGIONS = [
 const DR_TABLE = { '12/125':0, '11/125':1, '10/125':2, '9/125':3, '8/125':4, '7/125':5, '7/250':6 };
 const BW_CODE = { 125:0, 250:1, 500:2 };   // payload byte 4
 const CR_CODE = { '4/5':1 };               // payload byte 5 (1=4/5 ... 4=4/8)
+// AT+TXP index -> dBm on AS923. UNVERIFIED assumption: dBm = 16 - 2 * index (see CLAUDE.md).
+const TXP_DBM = [16, 14, 12, 10, 8, 6, 4, 2];
 
 /* ================= helpers ================= */
 const $ = id => document.getElementById(id);
@@ -97,8 +190,10 @@ const sleepers = new Set();
 const sleep = ms => new Promise(r => { const t = setTimeout(() => { sleepers.delete(w); r(); }, ms); const w = () => { clearTimeout(t); r(); }; sleepers.add(w); });
 const wakeAll = () => { [...sleepers].forEach(w => w()); sleepers.clear(); };
 const isHex = (s, n) => new RegExp(`^[0-9a-fA-F]{${n}}$`).test(s);
+const buzz = pattern => { try { navigator.vibrate && navigator.vibrate(pattern); } catch {} };
+function setStatus(text, kind = '') { const s = $('statusLine'); s.textContent = text; s.className = kind; }
 
-if (!navigator.bluetooth) log('Web Bluetooth not supported in this browser/OS\n');
+if (!navigator.bluetooth) { log('Web Bluetooth not supported in this browser/OS\n'); setStatus('Web Bluetooth not supported here', 'err'); }
 
 /* ================= form setup ================= */
 function fill(sel, items, def) {
@@ -106,16 +201,144 @@ function fill(sel, items, def) {
   if (def !== undefined) sel.value = def;
 }
 fill($('region'), REGIONS.map(r => [r.name, r.name]), 'AS923-2');
-fill($('txp'), [...Array(8).keys()].map(i => [i, i === 0 ? '0 (max)' : String(i)]), 0);
 fill($('sf'),  [12, 11, 10, 9, 8, 7].map(s => [s, 'SF' + s]), 7);
 fill($('bw'),  [[125, '125'], [250, '250']], 125);   // 500 kHz not valid for AS923/EU868 uplinks
 fill($('cr'),  [['4/5', '4/5']], '4/5');             // LoRaWAN fixes CR at 4/5
 
-const CFG_FIELDS = ['deveui','devaddr','nwkskey','appskey','region','txp','sf','bw','cr','cfgId','seqId','loc','total','interval'];
-function saveCfg() { try { localStorage.setItem(STORE_CFG, JSON.stringify(Object.fromEntries(CFG_FIELDS.map(k => [k, $(k).value])))); } catch {} }
-function loadCfg() { try { const c = JSON.parse(localStorage.getItem(STORE_CFG) || '{}'); CFG_FIELDS.forEach(k => { if (c[k] !== undefined) $(k).value = c[k]; }); } catch {} }
-CFG_FIELDS.forEach(k => $(k).addEventListener('change', saveCfg));
+/* ================= settings sections (validate / save / collapse) ================= */
+class FieldError extends Error { constructor(field, msg) { super(msg); this.field = field; } }
+
+const SECTIONS = {
+  keys:  { title: 'Device keys',    fields: ['devaddr', 'nwkskey', 'appskey'] },
+  radio: { title: 'LoRa parameters', fields: ['region', 'cr', 'sf', 'bw', 'txpDbm'] },
+  test:  { title: 'Test setup',     fields: ['cfgId', 'seqId', 'total', 'interval'] },
+};
+const ALL_FIELDS = Object.values(SECTIONS).flatMap(s => s.fields);
+
+// index of the nearest valid TX power step; a tie goes to the higher power
+function snapTxp(dbm) {
+  let best = 0;
+  TXP_DBM.forEach((d, i) => { if (Math.abs(d - dbm) < Math.abs(TXP_DBM[best] - dbm)) best = i; });
+  return best;
+}
+function updateTxpHint() {
+  const dbm = parseFloat($('txpDbm').value);
+  $('txpHint').textContent = isFinite(dbm)
+    ? `Will use ${TXP_DBM[snapTxp(dbm)]} dBm (AT+TXP=${snapTxp(dbm)})`
+    : 'Valid steps: 2 to 16 dBm in 2 dB steps';
+}
+
+const VALIDATE = {
+  keys() {
+    const v = {};
+    const hex = (id, n, name) => { v[id] = $(id).value.trim(); if (!isHex(v[id], n)) throw new FieldError(id, `${name} must be ${n} hex characters`); };
+    hex('devaddr', 8, 'DevAddr');
+    hex('nwkskey', 32, 'NetSKey');
+    hex('appskey', 32, 'AppSKey');
+    return v;
+  },
+  radio() {
+    const v = {};
+    v.region = REGIONS.find(r => r.name === $('region').value);
+    if (!v.region) throw new FieldError('region', 'Choose a region');
+    const dbm = parseFloat($('txpDbm').value);
+    if (!isFinite(dbm)) throw new FieldError('txpDbm', 'TX power must be a number in dBm');
+    v.txp = snapTxp(dbm);               // AT+TXP index
+    v.dbm = TXP_DBM[v.txp];             // snapped value, shown and sent in the payload
+    v.sf  = parseInt($('sf').value, 10);
+    v.bw  = parseInt($('bw').value, 10);
+    v.cr  = $('cr').value;
+    const dr = DR_TABLE[`${v.sf}/${v.bw}`];
+    if (dr === undefined) throw new FieldError('bw', `SF${v.sf}/BW${v.bw} is not a valid uplink data rate for this region`);
+    v.dr = dr;
+    return v;
+  },
+  test() {
+    const int = (id, name, lo, hi) => {
+      const n = parseInt($(id).value, 10);
+      if (!(n >= lo && n <= hi)) throw new FieldError(id, `${name} must be ${lo}-${hi}`);
+      return n;
+    };
+    return {
+      cfgId:    int('cfgId', 'Test configuration ID', 0, 255),
+      seqId:    int('seqId', 'Test sequence ID', 0, 255),
+      total:    int('total', 'Total TX packets', 1, 65535),
+      interval: int('interval', 'Interval', 1, 3600),
+    };
+  },
+};
+
+const SUMMARY = {
+  keys:  s => `DevAddr ${s.devaddr.toUpperCase()} · keys set`,
+  radio: s => `${s.region} · SF${s.sf}/${s.bw} kHz · CR ${s.cr} · ${s.txpDbm} dBm`,
+  test:  s => `Cfg ${s.cfgId} · Seq ${s.seqId} · ${s.total} pkts / ${s.interval} s`,
+};
+
+const snap = {};   // section -> field values as last saved (undefined = never saved)
+const valuesOf = sec => Object.fromEntries(SECTIONS[sec].fields.map(k => [k, $(k).value]));
+const isDirty = sec => !snap[sec] || SECTIONS[sec].fields.some(k => snap[sec][k] !== $(k).value);
+const setOpen = (sec, open) => { $('sec-' + sec).open = open; };
+
+function updateSection(sec) {
+  $('sum-' + sec).textContent = snap[sec] ? SUMMARY[sec](snap[sec]) : 'Not saved yet';
+  $('dirty-' + sec).hidden = !(snap[sec] && isDirty(sec));
+}
+function clearErr(sec) {
+  $('err-' + sec).textContent = '';
+  SECTIONS[sec].fields.forEach(k => $(k).removeAttribute('aria-invalid'));
+}
+function showErr(sec, e) {
+  $('err-' + sec).textContent = e.message;
+  if (e.field) { $(e.field).setAttribute('aria-invalid', 'true'); $(e.field).focus(); }
+}
+
+function readStored() { try { return JSON.parse(localStorage.getItem(STORE_CFG) || '{}'); } catch { return {}; } }
+function saveSection(sec) {
+  let v;
+  try { v = VALIDATE[sec](); } catch (e) { showErr(sec, e); return false; }
+  clearErr(sec);
+  if (sec === 'radio') { $('txpDbm').value = v.dbm; updateTxpHint(); }   // show the snapped value
+  snap[sec] = valuesOf(sec);
+  try { localStorage.setItem(STORE_CFG, JSON.stringify({ ...readStored(), ...snap[sec] })); } catch {}
+  updateSection(sec); setOpen(sec, false);
+  return true;
+}
+function loadCfg() {
+  const c = readStored();
+  ALL_FIELDS.forEach(k => { if (c[k] !== undefined) $(k).value = c[k]; });
+  for (const sec of Object.keys(SECTIONS)) {
+    const complete = SECTIONS[sec].fields.every(k => c[k] !== undefined);
+    let ok = false;
+    if (complete) { try { VALIDATE[sec](); ok = true; } catch {} }
+    if (ok) snap[sec] = valuesOf(sec);
+    updateSection(sec);
+    setOpen(sec, !ok);     // saved sections start collapsed, missing/invalid ones expanded
+  }
+}
+document.querySelectorAll('button.save').forEach(b => b.onclick = () => saveSection(b.dataset.sec));
+for (const sec of Object.keys(SECTIONS)) {
+  SECTIONS[sec].fields.forEach(k => $(k).addEventListener('input', () => { clearErr(sec); updateSection(sec); }));
+}
+$('txpDbm').addEventListener('input', updateTxpHint);
 loadCfg();
+updateTxpHint();
+
+/* ================= floor level + location (per spot, outside the saved sections) ================= */
+function clearSpotErr(id) { $(id + 'Err').textContent = ''; $(id).removeAttribute('aria-invalid'); }
+function storeFloor() { try { localStorage.setItem(STORE_FLOOR, $('floor').value); } catch {} }
+function stepFloor(d) {
+  const n = parseInt($('floor').value, 10);
+  $('floor').value = isNaN(n) ? 0 : Math.min(FLOOR_MAX, Math.max(0, n + d));
+  clearSpotErr('floor'); storeFloor();
+}
+try { $('floor').value = localStorage.getItem(STORE_FLOOR) || ''; } catch {}
+$('floorUp').onclick = () => stepFloor(1);
+$('floorDown').onclick = () => stepFloor(-1);
+$('floor').addEventListener('input', () => { clearSpotErr('floor'); storeFloor(); });
+$('loc').addEventListener('input', () => clearSpotErr('loc'));
+
+try { const s = localStorage.getItem(STORE_NAME); if (s !== null) $('nameBox').value = s; } catch {}
+$('nameBox').addEventListener('input', () => { try { localStorage.setItem(STORE_NAME, $('nameBox').value); } catch {} });
 
 /* ================= known-device list ================= */
 let dev = null, rx = null;
@@ -145,8 +368,8 @@ function renderKnown() {
   for (const e of known.values()) {
     const row = document.createElement('div');
     const label = document.createElement('span');
-    label.textContent = `${e.name || '(unnamed)'}  [${e.id.slice(0, 8)}…]  `;
-    const c = document.createElement('button'); c.textContent = 'Connect'; c.onclick = () => connectKnown(e);
+    label.textContent = `${e.name || '(unnamed)'}  [${e.id.slice(0, 8)}…]`;
+    const c = document.createElement('button'); c.textContent = 'Connect'; c.disabled = connected; c.onclick = () => connectKnown(e);
     const f = document.createElement('button'); f.textContent = 'Forget';
     f.onclick = async () => { try { if (e.obj && e.obj.forget) await e.obj.forget(); } catch {} known.delete(e.id); saveKnown(); renderKnown(); };
     row.append(label, c, f); box.append(row);
@@ -156,20 +379,23 @@ function renderKnown() {
 /* ================= UI state ================= */
 let running = false, stopFlag = false, connected = false;
 function refreshUi() {
-  $('scan').disabled = connected; $('byName').disabled = connected;
+  $('scan').disabled = connected;
+  $('nameBox').disabled = connected;
+  document.querySelectorAll('#known button:first-of-type').forEach(b => b.disabled = connected);
   $('disc').disabled = !connected || running;
   $('start').disabled = !connected || running;
   $('stop').disabled = !running;
   $('rawSend').disabled = !connected || running;
-  ['deveui','devaddr','nwkskey','appskey','region','txp','sf','bw','cr','cfgId','seqId','loc','total','interval']
-    .forEach(k => $(k).disabled = running);
-  $('status').textContent = connected ? `connected: ${dev && dev.name || ''}` : 'not connected';
+  [...ALL_FIELDS, 'loc', 'floor', 'floorUp', 'floorDown'].forEach(k => $(k).disabled = running);
+  document.querySelectorAll('button.save').forEach(b => b.disabled = running);
+  $('sum-conn').textContent = connected ? `Connected: ${dev && dev.name || ''}` : 'Not connected';
 }
 
 /* ================= line-based RX + AT command layer ================= */
 const decoder = new TextDecoder();
 let rxBuf = '';
 let pending = null;     // { lines, done(ok) }
+let setupSig = null;    // config the device was last set up with (this connection); null = setup needed
 
 function onNotify(e) {
   rxBuf += decoder.decode(e.target.value, { stream: true });
@@ -205,9 +431,10 @@ function cmd(c, timeout = 5000) {
 
 /* ================= connection ================= */
 function onDisconnected() {
-  rx = null; connected = false; stopFlag = true;
+  rx = null; connected = false; stopFlag = true; setupSig = null;
   if (pending) pending.done(false);
   wakeAll(); refreshUi(); log('[disconnected]\n');
+  if (!running) { setStatus('Disconnected', 'err'); setOpen('conn', true); }
 }
 async function connectTo(device) {
   dev = device;
@@ -215,6 +442,7 @@ async function connectTo(device) {
   dev.addEventListener('gattserverdisconnected', onDisconnected);
   try {
     log(`[connecting] ${dev.name || '(unnamed)'}\n`);
+    setStatus('Connecting…', 'busy');
     const server = await dev.gatt.connect();
     const svc = await server.getPrimaryService(NUS);
     rx = await svc.getCharacteristic(RX);
@@ -222,85 +450,79 @@ async function connectTo(device) {
     tx.removeEventListener('characteristicvaluechanged', onNotify);
     tx.addEventListener('characteristicvaluechanged', onNotify);
     await tx.startNotifications();
-    rxBuf = '';
+    rxBuf = ''; setupSig = null;
     rememberDevice(dev);
     connected = true; refreshUi(); log('[connected]\n');
+    setStatus('Connected. Ready.', 'ok'); setOpen('conn', false);
   } catch (e) {
     log(`[error] ${e.message}\n`);
     if (dev.gatt.connected) dev.gatt.disconnect();
     rx = null; connected = false; refreshUi();
+    setStatus(`Connection failed: ${e.message}`, 'err');
   }
 }
 async function chooser(options) {
   try {
     const d = await navigator.bluetooth.requestDevice({ ...options, optionalServices: [NUS] });
     rememberDevice(d); await connectTo(d);
-  } catch (e) { log(`[${e.name === 'NotFoundError' ? 'cancelled' : 'error'}] ${e.message}\n`); }
+  } catch (e) {
+    log(`[${e.name === 'NotFoundError' ? 'cancelled' : 'error'}] ${e.message}\n`);
+    setStatus(e.name === 'NotFoundError' ? 'Not connected (cancelled)' : `Connection failed: ${e.message}`, 'err');
+  }
 }
 async function connectKnown(e) {
   if (e.obj) return connectTo(e.obj);
   if (e.name && e.name !== '(unnamed)') chooser({ filters: [{ name: e.name }] });
   else chooser({ acceptAllDevices: true });
 }
-$('scan').onclick = () => chooser({ acceptAllDevices: true });
-$('byName').onclick = () => {
+// empty name box lists every nearby device; otherwise only names starting with the text
+$('scan').onclick = () => {
   const n = $('nameBox').value.trim();
-  if (!n) return log('[enter a name or prefix first]\n');
-  chooser({ filters: [{ namePrefix: n }] });
+  chooser(n ? { filters: [{ namePrefix: n }] } : { acceptAllDevices: true });
 };
 $('disc').onclick = () => dev && dev.gatt.connected && dev.gatt.disconnect();
 
 $('rawSend').onclick = async () => {
   const c = $('raw').value.trim(); if (!c) return;
+  setupSig = null;        // a raw command may change device settings; re-apply setup on the next run
   try { await cmd(c); } catch (e) { log(`[error] ${e.message}\n`); }
 };
 
+/* ================= screen wake lock ================= */
+let wakeLock = null;
+async function lockScreen() {
+  if (!navigator.wakeLock) return log('[note] screen wake lock not available; keep the screen on manually\n');
+  try { wakeLock = await navigator.wakeLock.request('screen'); }
+  catch (e) { log(`[wake lock failed] ${e.message}\n`); }
+}
+function unlockScreen() { if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; } }
+// the browser drops the lock when the tab is hidden; take it again when the page comes back mid-run
+document.addEventListener('visibilitychange', () => { if (running && document.visibilityState === 'visible') lockScreen(); });
+
 /* ================= test run ================= */
 function readParams() {
-  const p = {};
-  p.deveui  = $('deveui').value.trim();
-  p.devaddr = $('devaddr').value.trim();
-  p.nwkskey = $('nwkskey').value.trim();
-  p.appskey = $('appskey').value.trim();
-  if (!isHex(p.deveui, 16))  throw new Error('DevEUI must be 16 hex characters');
-  if (!isHex(p.devaddr, 8))  throw new Error('DevAddr must be 8 hex characters');
-  if (!isHex(p.nwkskey, 32)) throw new Error('NetSKey must be 32 hex characters');
-  if (!isHex(p.appskey, 32)) throw new Error('AppSKey must be 32 hex characters');
-
-  p.region = REGIONS.find(r => r.name === $('region').value);
-  p.txp = parseInt($('txp').value, 10);
-  p.sf  = parseInt($('sf').value, 10);
-  p.bw  = parseInt($('bw').value, 10);
-  p.cr  = $('cr').value;
-  const dr = DR_TABLE[`${p.sf}/${p.bw}`];
-  if (dr === undefined) throw new Error(`SF${p.sf}/BW${p.bw} is not a valid uplink data rate for this region`);
-  p.dr = dr;
-
-  const byte = (id, name) => { const v = parseInt($(id).value, 10); if (!(v >= 0 && v <= 255)) throw new Error(name + ' must be 0-255'); return v; };
-  p.cfgId = byte('cfgId', 'Test configuration ID');
-  p.seqId = byte('seqId', 'Test sequence ID');
-
+  const p = { ...VALIDATE.keys(), ...VALIDATE.radio(), ...VALIDATE.test() };
+  const floorText = $('floor').value.trim();
+  p.floor = Number(floorText);
+  if (floorText === '' || !Number.isInteger(p.floor) || p.floor < 0 || p.floor > FLOOR_MAX)
+    throw new FieldError('floor', `Floor level must be 0-${FLOOR_MAX}`);
   p.loc = $('loc').value;
-  if (!/^[\x21-\x7e]{3}$/.test(p.loc)) throw new Error('Location ID must be exactly 3 printable ASCII characters');
-
-  p.total = parseInt($('total').value, 10);
-  if (!(p.total >= 1 && p.total <= 65535)) throw new Error('Total TX packets must be 1-65535');
-  p.interval = parseInt($('interval').value, 10);
-  if (!(p.interval >= 1)) throw new Error('Interval must be at least 1 second');
+  if (!/^[\x21-\x7e]{3}$/.test(p.loc)) throw new FieldError('loc', 'Location ID must be exactly 3 printable ASCII characters');
   return p;
 }
 
 function buildPayload(p, n) {
-  const b = new Uint8Array(13);
+  const b = new Uint8Array(14);
   b[0] = p.cfgId;
   b[1] = p.seqId;
-  b[2] = p.txp;                       // AT+TXP index (see notes)
+  b[2] = p.dbm & 0xff;                // TX power in dBm, signed 8-bit (two's complement)
   b[3] = p.sf;
   b[4] = BW_CODE[p.bw];
   b[5] = CR_CODE[p.cr];
   for (let i = 0; i < 3; i++) b[6 + i] = p.loc.charCodeAt(i);
   b[9]  = (p.total >> 8) & 0xff; b[10] = p.total & 0xff;   // big-endian
   b[11] = (n >> 8) & 0xff;       b[12] = n & 0xff;         // big-endian
+  b[13] = p.floor;
   return [...b].map(x => x.toString(16).padStart(2, '0')).join('').toUpperCase();
 }
 
@@ -317,8 +539,7 @@ async function runSetup(p) {
   await cmd('AT+NJM=0');                        // ABP
   await cmd('AT+CLASS=A');
   await cmd(`AT+BAND=${p.region.band}`);
-  await cmd(`AT+DEVEUI=${p.deveui}`);
-  await cmd(`AT+DEVADDR=${p.devaddr}`);
+  await cmd(`AT+DEVADDR=${p.devaddr}`);         // DevEUI is not used by ABP
   await cmd(`AT+NWKSKEY=${p.nwkskey}`);
   await cmd(`AT+APPSKEY=${p.appskey}`);
   await cmd('AT+ADR=0');
@@ -338,27 +559,71 @@ async function sendWithRetry(hex) {
   throw lastErr;
 }
 
+// Returns the parameters, or null after showing the problem next to the Start button.
+function preflight() {
+  for (const sec of Object.keys(SECTIONS)) {
+    if (!isDirty(sec)) continue;
+    setOpen(sec, true);
+    showErr(sec, new Error(snap[sec] ? 'Unsaved changes: press Save' : 'Press Save to confirm these values'));
+    $('sec-' + sec).scrollIntoView({ block: 'nearest' });
+    setStatus(`Save the "${SECTIONS[sec].title}" section first`, 'err');
+    return null;
+  }
+  try { return readParams(); }
+  catch (e) {
+    log(`[invalid] ${e.message}\n`);
+    if (e.field === 'loc' || e.field === 'floor') {
+      $(e.field + 'Err').textContent = e.message; $(e.field).setAttribute('aria-invalid', 'true'); $(e.field).focus();
+    }
+    setStatus(e.message, 'err');
+    return null;
+  }
+}
+
 async function startTest() {
-  let p;
-  try { p = readParams(); } catch (e) { return log(`[invalid] ${e.message}\n`); }
-  saveCfg();
+  const p = preflight();
+  if (!p) return buzz(150);
   running = true; stopFlag = false; refreshUi(); setProgress(0, p.total);
+  ['conn', ...Object.keys(SECTIONS)].forEach(s => setOpen(s, false));
+  await lockScreen();
   let sent = 0;
   try {
-    await runSetup(p);
+    // setup only when something changed since the last run on this connection
+    const sig = JSON.stringify([p.devaddr, p.nwkskey, p.appskey, p.region.band, p.dr, p.txp]);   // txp = AT+TXP index
+    if (sig !== setupSig) {
+      setupSig = null;
+      setStatus('Configuring device…', 'busy');
+      await runSetup(p);
+      setupSig = sig;
+    } else log('[setup skipped: unchanged since the last run]\n');
     for (let n = 0; n < p.total; n++) {
       if (stopFlag) break;
       const hex = buildPayload(p, n);
       log(`[tx ${n + 1}/${p.total}] ${hex}\n`);
+      setStatus(`Sending ${n + 1} / ${p.total} at ${p.loc}`, 'busy');
       if (!(await sendWithRetry(hex))) break;
       sent = n + 1; setProgress(sent, p.total);
-      if (n < p.total - 1) await sleep(p.interval * 1000);
+      if (n < p.total - 1) {
+        setStatus(`Sent ${sent} / ${p.total} at ${p.loc}, next in ${p.interval} s`, 'busy');
+        await sleep(p.interval * 1000);
+      }
     }
-    log(stopFlag ? `[stopped] ${sent}/${p.total} sent\n` : `[done] ${sent}/${p.total} sent\n`);
+    if (!connected) {
+      log(`[stopped] disconnected, ${sent}/${p.total} sent\n`);
+      setStatus(`Disconnected: ${sent} / ${p.total} sent`, 'err'); buzz([300, 100, 300]);
+    } else if (stopFlag) {
+      log(`[stopped] ${sent}/${p.total} sent\n`);
+      setStatus(`Stopped: ${sent} / ${p.total} sent`, 'err'); buzz(150);
+    } else {
+      log(`[done] ${sent}/${p.total} sent\n`);
+      setStatus(`Done: ${sent} / ${p.total} sent at ${p.loc}`, 'ok'); buzz(400);
+    }
   } catch (e) {
     log(`[aborted] ${e.message}\n`);
+    setStatus(`Aborted after ${sent} / ${p.total}: ${e.message}`, 'err'); buzz([300, 100, 300]);
   } finally {
-    running = false; refreshUi();
+    running = false; unlockScreen(); refreshUi();
+    if (!connected) setOpen('conn', true);
   }
 }
 $('start').onclick = startTest;

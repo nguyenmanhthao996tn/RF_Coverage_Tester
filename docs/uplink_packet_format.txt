@@ -7,3 +7,4 @@ Byte 5:     CR code: 1 = 4/5, 2 = 4/6, 3 = 4/7, 4 = 4/8.
 Byte 6-8:   Location ID, 3 ASCII characters, e.g. "A12".
 Byte 9-10:  Total TX packets in this sequence. Unsigned 16-bit, big-endian.
 Byte 11-12: Current TX packet count, starting from 0. Unsigned 16-bit, big-endian.
+Byte 13: The current floor level.
