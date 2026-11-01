@@ -47,7 +47,7 @@ elsewhere and are out of scope.
 - Page structure: a run card at the top (Location ID, Start/Stop, progress, status line) and collapsible settings sections below (Connection, Device keys, LoRa parameters, Test setup, Debug). Each settings section has its own Save button that validates, stores and collapses it; Start refuses to run while a section is unsaved. The Debug section (raw AT, log) is collapsed by default.
 - DevEUI is not used: ABP uplinks never carry it, so the page neither asks for it nor sends `AT+DEVEUI` (unverified on a real unit; the module keeps its factory DevEUI).
 - `runSetup()` runs only on the first Start of a connection or when keys/region/DR/TX power changed (or after a raw AT command), not before every run.
-- Per-spot inputs sit outside the saved sections. Location ID is deliberately not persisted. Floor level (0-12, stepper, payload byte 13) is persisted, starts empty, and Start requires it.
+- Per-spot inputs sit outside the saved sections. Location ID is deliberately not persisted. Floor level (0-255, stepper, payload byte 13) is persisted, starts empty, and Start requires it.
 - Connection: known devices first, then a name/prefix box, one Scan button (empty box = list all devices, otherwise a `namePrefix` filter), then Disconnect. The box value is remembered.
 
 ## Conventions

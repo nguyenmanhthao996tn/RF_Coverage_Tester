@@ -59,10 +59,10 @@
 
 <!-- ============ run area: the part used at every spot ============ -->
 <div class="run">
-  <label for="floor" style="margin-top:0">Floor level (0-12)</label>
+  <label for="floor" style="margin-top:0">Floor level (0-255)</label>
   <div class="stepper">
     <button id="floorDown" type="button" aria-label="Floor down">&minus;</button>
-    <input type="number" id="floor" min="0" max="12" step="1" inputmode="numeric" placeholder="0-12" autocomplete="off">
+    <input type="number" id="floor" min="0" max="255" step="1" inputmode="numeric" placeholder="0-255" autocomplete="off">
     <button id="floorUp" type="button" aria-label="Floor up">+</button>
   </div>
   <div class="err" id="floorErr"></div>
@@ -135,7 +135,7 @@
       <div><label for="cfgId">Config ID (0-255)</label><input type="number" id="cfgId" value="0" min="0" max="255" inputmode="numeric"></div>
       <div><label for="seqId">Sequence ID (0-255)</label><input type="number" id="seqId" value="0" min="0" max="255" inputmode="numeric"></div>
       <div><label for="total">Total packets (1-65535)</label><input type="number" id="total" value="20" min="1" max="65535" inputmode="numeric"></div>
-      <div><label for="interval">Interval (s)</label><input type="number" id="interval" value="10" min="1" max="3600" inputmode="numeric"></div>
+      <div><label for="interval">Interval (s)</label><input type="number" id="interval" value="2" min="1" max="3600" inputmode="numeric"></div>
     </div>
     <div class="err" id="err-test"></div>
     <button class="save" data-sec="test">Save</button>
@@ -166,7 +166,7 @@ const STORE_CFG = 'lora_test_cfg';
 const STORE_NAME = 'ble_name_filter';
 const STORE_FLOOR = 'floor_level';
 const LORAWAN_PORT = 2;
-const FLOOR_MAX = 12;
+const FLOOR_MAX = 255;   // payload byte 13 is one unsigned byte
 
 // RUI3 AT+BAND index. Verify against the RAK AT command manual.
 const REGIONS = [
