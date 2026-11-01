@@ -1,0 +1,9 @@
+Byte 0:     Test configuration ID. Default 0.
+Byte 1:     Test sequence ID. Default 0.
+Byte 2:     TX power in dBm. Signed 8-bit (two's complement), e.g. 16 = 0x10, 2 = 0x02, -3 = 0xFD.
+Byte 3:     SF, 7-12.
+Byte 4:     BW code: 0 = 125 kHz, 1 = 250 kHz, 2 = 500 kHz.
+Byte 5:     CR code: 1 = 4/5, 2 = 4/6, 3 = 4/7, 4 = 4/8.
+Byte 6-8:   Location ID, 3 ASCII characters, e.g. "A12".
+Byte 9-10:  Total TX packets in this sequence. Unsigned 16-bit, big-endian.
+Byte 11-12: Current TX packet count, starting from 0. Unsigned 16-bit, big-endian.

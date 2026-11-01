@@ -1,0 +1,25 @@
+AT+PSF,RW: configure P2P Spreading Factor (5-12)(Note:This command will be deleted in the future)
+AT+PBW,RW: configure P2P Bandwidth(LORA: 0 = 125, 1 = 250, 2 = 500, 3 = 7.8, 4 = 10.4, 5 = 15.63, 6 = 20.83, 7 = 31.25, 8 = 41.67, 9 = 62.5  FSK:4800-467000)(Note:This command will be deleted in the future)
+AT+PCR,RW: configure P2P Code Rate(0=4/5, 1=4/6, 2=4/7, 3=4/8)(Note:This command will be deleted in the future)
+AT+PPL,RW: configure P2P Preamble Length (5-65535)(Note:This command will be deleted in the future)
+AT+PTP,RW: configure P2P TX Power(5-22)(Note:This command will be deleted in the future)
+AT+PSEND,W: send data in P2P mode
+AT+PRECV,RW: enter P2P RX mode for a period of time (ms)
+AT+ENCRY,RW: get or set the encryption status of P2P mode
+AT+CAD,RW: get or set the Channel Activity Detection status of P2P mode
+AT+ENCKEY,RW: get or set the encryption key of P2P mode (16 bytes in hex)
+AT+CRYPIV,RW: get or set the encryption IV of P2P mode (16 bytes in hex)
+AT+P2P,RW: get or set all P2P parameters
+AT+PBR,RW: get or set the P2P FSK modem bitrate (600-300000 b/s)
+AT+PFDEV,RW: get or set the P2P FSK modem frequency deviation (600-200000 hz)
+AT+IQINVER,RW: get or set P2P IQ inversion (1 = on, 0 = off)
+AT+SYNCWORD,RW: get or set P2P syncword (0x0000 - 0xffff)
+AT+RFFREQUENCY,RW: get or set P2P Frequency
+AT+TXOUTPUTPOWER,RW: get or set P2P Tx Power(5-22)
+AT+BANDWIDTH,RW: get or set P2P Bandwidth(LORA: 0 = 125, 1 = 250, 2 = 500, 3 = 7.8, 4 = 10.4, 5 = 15.63, 6 = 20.83, 7 = 31.25, 8 = 41.67, 9 = 62.5  FSK:4800-467000)
+AT+SPREADINGFACTOR,RW: get or set P2P Spreading Factor (5-12)
+AT+CODINGRATE,RW: get or set P2P Code Rate(0=4/5, 1=4/6, 2=4/7, 3=4/8)
+AT+PREAMBLELENGTH,RW: get or set P2P Preamble Length (5-65535)
+AT+SYMBOLTIMEOUT,RW: get or set P2P symbolTimeout (0-248)
+AT+FIXLENGTHPAYLOAD,RW: get or set P2P fix length payload on/off ( 1 = on, 0 = off)
+OK
