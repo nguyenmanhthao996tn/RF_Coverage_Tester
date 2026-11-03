@@ -13,6 +13,7 @@ elsewhere and are out of scope.
 
 - `src/rak11720_rui3_firmware/rak11720_rui3_firmware.ino` - Arduino IDE sketch. Pure BLE (Nordic UART) <-> AT command bridge.
 - `src/web_control/index.html` - single-file Web Bluetooth control page. No build step, no dependencies.
+- `src/web_control/docker-compose.yml` - Hosting: BusyBox httpd serving the folder on 127.0.0.1:8080, fronted by `tailscale serve` for HTTPS. Not yet run on the LXC from this repo.
 - `docs/uplink_packet_format.txt` - 14-byte test payload. **Source of truth** for the payload.
 - `docs/rak_rui3_at_commands.txt` - RUI3 AT command reference (full list, including `AT+BAND` indices). Not an app input; just reference.
 
@@ -41,7 +42,7 @@ elsewhere and are out of scope.
 
 ## Web app
 
-- Run locally for now (Web Bluetooth needs HTTPS or `localhost`; `file://` will not work). Hosting is undecided.
+- Web Bluetooth needs a secure context (HTTPS or `localhost`; `file://` will not work, and `http://<tailscale-ip>` is not secure). Hosted on a Proxmox LXC via `src/web_control/docker-compose.yml` plus `tailscale serve --bg 8080` on the host. Deploy: `git pull && docker compose up -d` in `src/web_control`.
 - Target: **mobile first**, Chrome on Android primary, Windows Chrome secondary. iOS is not supported by Web Bluetooth.
 - Keep it a single dependency-free `index.html`. No frameworks or build tooling for now.
 - Page structure: a run card at the top (Location ID, Start/Stop, progress, status line) and collapsible settings sections below (Connection, Device keys, LoRa parameters, Test setup, Debug). Each settings section has its own Save button that validates, stores and collapses it; Start refuses to run while a section is unsaved. The Debug section (raw AT, log) is collapsed by default.
