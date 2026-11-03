@@ -55,6 +55,11 @@
   .tabs button[aria-selected=true] { background:var(--busy); border-color:var(--busy); color:#fff; font-weight:600; }
   .tabpanel[hidden] { display:none; }
 
+  #devNote { margin-top:10px; padding:8px 10px; border-radius:6px; background:#f1f3f4; font-size:14px; }
+  #devNote:empty { display:none; }
+  #devNote.ok  { background:#e8f5e9; color:var(--ok); }
+  #devNote.err { background:#ffebee; color:var(--err); }
+
   #known > div { display:flex; align-items:center; gap:8px; margin:6px 0; }
   #known span { flex:1; overflow-wrap:anywhere; font-size:14px; }
   #log { background:#111; color:#0f0; padding:8px; min-height:160px; max-height:320px; overflow:auto; white-space:pre-wrap; font-size:12px; }
@@ -159,6 +164,16 @@
     </div>
     <div class="err" id="err-test"></div>
     <button class="save" data-sec="test">Save</button>
+  </div>
+</details>
+
+<!-- ============ 5. device ============ -->
+<details class="sec" id="sec-dev">
+  <summary><span class="t">5. Device</span><span class="sum">Reset the module to defaults</span></summary>
+  <div class="body">
+    <button id="devReset" class="danger wide" disabled>Reset module to defaults (ATR)</button>
+    <div id="devNote" role="status" aria-live="polite"></div>
+    <div class="hint">Wipes the keys, region and other LoRaWAN settings on the module. The module probably restarts and drops Bluetooth; the page reconnects and checks it. Saved settings here are kept and re-applied on the next Start.</div>
   </div>
 </details>
 
@@ -467,14 +482,18 @@ function renderKnown() {
 
 /* ================= UI state ================= */
 let running = false, stopFlag = false, connected = false;
+let busy = false;               // a device reset is in progress
+let expectDisconnect = false;   // the module is expected to drop BLE (reset): no error banner
 function refreshUi() {
-  $('scan').disabled = connected;
+  const idle = connected && !running && !busy;
+  $('scan').disabled = connected || busy;
   $('nameBox').disabled = connected;
-  document.querySelectorAll('#known button:first-of-type').forEach(b => b.disabled = connected);
-  $('disc').disabled = !connected || running;
-  $('start').disabled = !connected || running;
+  document.querySelectorAll('#known button:first-of-type').forEach(b => b.disabled = connected || busy);
+  $('disc').disabled = !idle;
+  $('start').disabled = !idle;
   $('stop').disabled = !running;
-  $('rawSend').disabled = !connected || running;
+  $('rawSend').disabled = !idle;
+  $('devReset').disabled = !idle;
   [...ALL_FIELDS, 'dr', 'loc', 'floor', 'floorUp', 'floorDown'].forEach(k => $(k).disabled = running);
   document.querySelectorAll('button.save').forEach(b => b.disabled = running);
   $('sum-conn').textContent = connected ? `Connected: ${dev && dev.name || ''}` : 'Not connected';
@@ -523,15 +542,18 @@ function onDisconnected() {
   rx = null; connected = false; stopFlag = true; setupSig = null;
   if (pending) pending.done(false);
   wakeAll(); refreshUi(); log('[disconnected]\n');
+  if (expectDisconnect) return;
+  clearDev();     // the read-out no longer describes a connected module
   if (!running) { setStatus('Disconnected', 'err'); setOpen('conn', true); }
 }
-async function connectTo(device) {
+// quiet: a retry inside the reset flow; no status messages. Returns true when connected.
+async function connectTo(device, quiet = false) {
   dev = device;
   dev.removeEventListener('gattserverdisconnected', onDisconnected);
   dev.addEventListener('gattserverdisconnected', onDisconnected);
   try {
     log(`[connecting] ${dev.name || '(unnamed)'}\n`);
-    setStatus('Connecting…', 'busy');
+    if (!quiet) setStatus('Connecting…', 'busy');
     const server = await dev.gatt.connect();
     const svc = await server.getPrimaryService(NUS);
     rx = await svc.getCharacteristic(RX);
@@ -543,11 +565,13 @@ async function connectTo(device) {
     rememberDevice(dev);
     connected = true; refreshUi(); log('[connected]\n');
     setStatus('Connected. Ready.', 'ok'); setOpen('conn', false);
+    return true;
   } catch (e) {
     log(`[error] ${e.message}\n`);
     if (dev.gatt.connected) dev.gatt.disconnect();
     rx = null; connected = false; refreshUi();
-    setStatus(`Connection failed: ${e.message}`, 'err');
+    if (!quiet) setStatus(`Connection failed: ${e.message}`, 'err');
+    return false;
   }
 }
 async function chooser(options) {
@@ -578,6 +602,82 @@ $('rawSend').onclick = async () => {
   setupSig = null;        // a raw command may change device settings; re-apply setup on the next run
   try { await cmd(c); } catch (e) { log(`[error] ${e.message}\n`); }
 };
+
+/* ================= device section: reset ================= */
+// A getter replies "AT+NWM=1" then "OK" (seen on a real unit, RUI_4.3.0_RAK11720).
+// The value is what follows the last "<at>=" in the reply lines. Searching inside the line, not
+// only at its start, keeps a value that BLE glued to a half-lost earlier line, e.g. "AT+SN=AC1F09FAT+BAT=3.4".
+function getterValue(lines, at) {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const k = lines[i].lastIndexOf(`${at}=`);
+    if (k >= 0) { const v = lines[i].slice(k + at.length + 1).trim(); if (v !== '?') return v; }   // '?' = echoed command
+  }
+}
+function devNote(text, kind = '') { const n = $('devNote'); n.textContent = text; n.className = kind; }
+function clearDev() { devNote(''); }
+
+const P2P_MSG = 'The module is in P2P mode (AT+NWM=0), so the LoRaWAN settings are not available. Send AT+NWM=1 in Debug (the module reboots), reconnect, then try again.';
+
+const wait = ms => new Promise(r => setTimeout(r, ms));   // unlike sleep(), a disconnect does not cut it short
+async function waitFor(pred, ms) {
+  const t0 = Date.now();
+  while (!pred() && Date.now() - t0 < ms) await wait(100);
+  return pred();
+}
+// after a reconnect the module may still be printing its boot text; retry plain AT until it answers OK
+async function probe() {
+  for (let i = 0; i < 10 && connected; i++) {
+    try { await cmd('AT', 2000); return true; } catch { await wait(500); }
+  }
+  return false;
+}
+async function reconnect(ms) {
+  const t0 = Date.now();
+  for (let n = 1; Date.now() - t0 < ms; n++) {
+    log(`[reconnect attempt ${n}]\n`);
+    if (await connectTo(dev, true)) return true;
+    await wait(1500);
+  }
+  return false;
+}
+
+async function resetDevice() {
+  if (!confirm('Restore the module to factory defaults (ATR)?\n\nThe keys, region and other LoRaWAN settings on the module are wiped. The settings saved on this page are kept and re-applied on the next Start.')) return;
+  busy = true; expectDisconnect = true; refreshUi();
+  const t0 = Date.now();
+  try {
+    setStatus('Resetting module…', 'busy'); devNote('Sending ATR…');
+    log('[reset] sending ATR\n');
+    let accepted = false, atrErr = '';
+    try { await cmd('ATR', 8000); accepted = true; } catch (e) { atrErr = e.message; }
+    const dropped = await waitFor(() => !connected, accepted ? 6000 : 3000);
+    setupSig = null;                          // the module forgot the setup; the next Start must redo it
+    if (!dropped && !accepted) throw new Error(`ATR was not accepted (${atrErr})`);
+    if (dropped) {
+      log('[reset] the module dropped Bluetooth (restarting)\n');
+      setStatus('Module restarting, reconnecting…', 'busy'); devNote('Module restarting, reconnecting…');
+      if (!(await reconnect(25000))) throw new Error('could not reconnect after the reset; use Connect or Scan');
+    } else log('[reset] ATR accepted but Bluetooth stayed up (no restart observed)\n');
+    if (!(await probe())) throw new Error('the module does not answer AT after the reset');
+    setStatus('Verifying the module…', 'busy'); devNote('Verifying…');
+    let nwm;
+    try { nwm = getterValue(await cmd('AT+NWM=?'), 'AT+NWM'); } catch (e) { nwm = undefined; log(`[reset] AT+NWM=? failed: ${e.message}\n`); }
+    const secs = Math.round((Date.now() - t0) / 1000);
+    const problem = nwm === '1' ? '' : nwm === '0' ? P2P_MSG : 'could not confirm LoRaWAN mode (AT+NWM must be 1)';
+    if (problem) {
+      const msg = `Reset sent, but: ${problem}`;
+      log(`[reset] ${msg}\n`); devNote(msg, 'err'); setStatus(msg, 'err'); buzz([300, 100, 300]);
+    } else {
+      const msg = `Reset OK in ${secs} s: the module answers and is in LoRaWAN mode. Setup is re-applied on the next Start.`;
+      log(`[reset] ${msg}\n`); devNote(msg, 'ok'); setStatus(msg, 'ok'); buzz(400);
+    }
+  } catch (e) {
+    log(`[error] reset: ${e.message}\n`);
+    devNote(`Reset failed: ${e.message}`, 'err'); setStatus(`Reset failed: ${e.message}`, 'err'); buzz([300, 100, 300]);
+    if (!connected) setOpen('conn', true);
+  } finally { expectDisconnect = false; busy = false; refreshUi(); }
+}
+$('devReset').onclick = resetDevice;
 
 /* ================= screen wake lock ================= */
 let wakeLock = null;
@@ -625,7 +725,7 @@ function setProgress(n, total) {
 async function runSetup(p) {
   log('[setup]\n');
   const nwm = await cmd('AT+NWM=?').catch(() => []);
-  if (nwm.length && nwm[0].trim() === '0')
+  if (getterValue(nwm, 'AT+NWM') === '0')
     throw new Error('Device is in P2P mode. Set AT+NWM=1 (this reboots the device), reconnect, then retry');
   await cmd('AT+NJM=0');                        // ABP
   await cmd('AT+CLASS=A');
