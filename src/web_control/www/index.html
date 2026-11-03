@@ -50,6 +50,11 @@
   .err:empty { display:none; }
   .save { width:100%; margin-top:12px; }
 
+  .tabs { display:flex; gap:4px; margin-top:14px; border-bottom:2px solid var(--busy); }
+  .tabs button { flex:1; border-bottom:none; border-radius:8px 8px 0 0; }
+  .tabs button[aria-selected=true] { background:var(--busy); border-color:var(--busy); color:#fff; font-weight:600; }
+  .tabpanel[hidden] { display:none; }
+
   #known > div { display:flex; align-items:center; gap:8px; margin:6px 0; }
   #known span { flex:1; overflow-wrap:anywhere; font-size:14px; }
   #log { background:#111; color:#0f0; padding:8px; min-height:160px; max-height:320px; overflow:auto; white-space:pre-wrap; font-size:12px; }
@@ -113,14 +118,29 @@
   <div class="body">
     <div class="grid2">
       <div><label for="region">Region</label><select id="region"></select></div>
-      <div><label for="cr">CR</label><select id="cr"></select></div>
-      <div><label for="sf">SF</label><select id="sf"></select></div>
-      <div><label for="bw">BW (kHz)</label><select id="bw"></select></div>
+      <div><label for="fport">FPort (1-223)</label><input type="number" id="fport" value="2" min="1" max="223" step="1" inputmode="numeric"></div>
       <div class="span2">
         <label for="txpDbm">TX power (dBm)</label>
         <input type="number" id="txpDbm" value="16" min="2" max="16" step="1" inputmode="numeric">
         <div class="hint" id="txpHint"></div>
       </div>
+    </div>
+    <div class="tabs" role="tablist" aria-label="Data rate input">
+      <button type="button" role="tab" id="tab-dr" aria-controls="panel-dr" aria-selected="true">By Datarate</button>
+      <button type="button" role="tab" id="tab-manual" aria-controls="panel-manual" aria-selected="false" tabindex="-1">Manual</button>
+    </div>
+    <div class="tabpanel" role="tabpanel" id="panel-dr" aria-labelledby="tab-dr">
+      <label for="dr">Data rate</label>
+      <select id="dr"></select>
+      <div class="hint">From the LoRaWAN Regional Parameters (not checked against the spec text). DR0, DR1 and DR6 are untested on the RAK11720; RAK's manual lists only DR2-DR5 for AS923.</div>
+    </div>
+    <div class="tabpanel" role="tabpanel" id="panel-manual" aria-labelledby="tab-manual" hidden>
+      <div class="grid2">
+        <div><label for="sf">SF</label><select id="sf"></select></div>
+        <div><label for="bw">BW (kHz)</label><select id="bw"></select></div>
+        <div><label for="cr">CR</label><select id="cr"></select></div>
+      </div>
+      <div class="hint">Shares its values with By Datarate. A SF/BW pair with no data rate is rejected on Save.</div>
     </div>
     <div class="err" id="err-radio"></div>
     <button class="save" data-sec="radio">Save</button>
@@ -153,6 +173,7 @@
     </div>
     <label>Log</label>
     <pre id="log"></pre>
+    <button id="saveLog" class="wide">Save log</button>
   </div>
 </details>
 
@@ -165,8 +186,9 @@ const STORE_DEV = 'ble_known_devices';
 const STORE_CFG = 'lora_test_cfg';
 const STORE_NAME = 'ble_name_filter';
 const STORE_FLOOR = 'floor_level';
-const LORAWAN_PORT = 2;
+const STORE_TAB = 'radio_tab';
 const FLOOR_MAX = 255;   // payload byte 13 is one unsigned byte
+const FPORT_MAX = 223;   // LoRaWAN application ports are 1-223; RAK's AT manual does not state its own limit (unverified)
 
 // RUI3 AT+BAND index. Verify against the RAK AT command manual.
 const REGIONS = [
@@ -176,8 +198,14 @@ const REGIONS = [
   { name: 'AS923-4', band: 11 },
   { name: 'EU868',   band: 4  },
 ];
-// SF/BW -> LoRaWAN DR. Valid for AS923-x and EU868 uplinks.
-const DR_TABLE = { '12/125':0, '11/125':1, '10/125':2, '9/125':3, '8/125':4, '7/125':5, '7/250':6 };
+// LoRaWAN Regional Parameters data rates (LoRa only; DR7 is FSK and the payload cannot describe it).
+// Same list for AS923-x and EU868 uplinks. Not checked against the spec text.
+const RP_DR = [
+  { dr: 0, sf: 12, bw: 125 }, { dr: 1, sf: 11, bw: 125 }, { dr: 2, sf: 10, bw: 125 },
+  { dr: 3, sf: 9,  bw: 125 }, { dr: 4, sf: 8,  bw: 125 }, { dr: 5, sf: 7,  bw: 125 },
+  { dr: 6, sf: 7,  bw: 250 },
+];
+const DR_TABLE = Object.fromEntries(RP_DR.map(d => [`${d.sf}/${d.bw}`, d.dr]));   // 'SF/BW' -> DR
 const BW_CODE = { 125:0, 250:1, 500:2 };   // payload byte 4
 const CR_CODE = { '4/5':1 };               // payload byte 5 (1=4/5 ... 4=4/8)
 // AT+TXP index -> dBm on AS923. UNVERIFIED assumption: dBm = 16 - 2 * index (see CLAUDE.md).
@@ -185,7 +213,27 @@ const TXP_DBM = [16, 14, 12, 10, 8, 6, 4, 2];
 
 /* ================= helpers ================= */
 const $ = id => document.getElementById(id);
-const log = s => { const l = $('log'); l.textContent += s; l.scrollTop = l.scrollHeight; };
+const pad = (n, w = 2) => String(n).padStart(w, '0');
+const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const hms = d => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
+const KEY_RE = /\b[0-9a-fA-F]{32}\b/g;   // 16-byte keys; the 14-byte payload (28 hex) never matches
+const logEntries = [];                    // { t: Date, text } - the saved file uses the full date
+const log = s => {
+  const t = new Date();
+  const text = s.replace(KEY_RE, '<key hidden>').replace(/\n$/, '');
+  logEntries.push({ t, text });
+  const l = $('log'); l.textContent += `${hms(t)} ${text}\n`; l.scrollTop = l.scrollHeight;
+};
+function saveLog() {
+  const now = new Date();
+  const lines = logEntries.map(e => `${ymd(e.t)} ${hms(e.t)} ${e.text}`);
+  const blob = new Blob([`RF Coverage Tester log, saved ${ymd(now)} ${hms(now)}\n${lines.join('\n')}\n`], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `rf-coverage-log_${ymd(now).replace(/-/g, '')}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.txt`;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
 const sleepers = new Set();
 const sleep = ms => new Promise(r => { const t = setTimeout(() => { sleepers.delete(w); r(); }, ms); const w = () => { clearTimeout(t); r(); }; sleepers.add(w); });
 const wakeAll = () => { [...sleepers].forEach(w => w()); sleepers.clear(); };
@@ -204,16 +252,49 @@ fill($('region'), REGIONS.map(r => [r.name, r.name]), 'AS923-2');
 fill($('sf'),  [12, 11, 10, 9, 8, 7].map(s => [s, 'SF' + s]), 7);
 fill($('bw'),  [[125, '125'], [250, '250']], 125);   // 500 kHz not valid for AS923/EU868 uplinks
 fill($('cr'),  [['4/5', '4/5']], '4/5');             // LoRaWAN fixes CR at 4/5
+fill($('dr'),  [['', '(no match: set in Manual)'], ...RP_DR.map(d => [d.dr, `DR${d.dr} · SF${d.sf} / ${d.bw} kHz`])], 5);   // DR5 = SF7/125, same as the SF/BW defaults
+$('dr').options[0].disabled = true;
 
 /* ================= settings sections (validate / save / collapse) ================= */
 class FieldError extends Error { constructor(field, msg) { super(msg); this.field = field; } }
 
 const SECTIONS = {
   keys:  { title: 'Device keys',    fields: ['devaddr', 'nwkskey', 'appskey'] },
-  radio: { title: 'LoRa parameters', fields: ['region', 'cr', 'sf', 'bw', 'txpDbm'] },
+  radio: { title: 'LoRa parameters', fields: ['region', 'fport', 'txpDbm', 'cr', 'sf', 'bw'] },   // the DR select only mirrors sf/bw
   test:  { title: 'Test setup',     fields: ['cfgId', 'seqId', 'total', 'interval'] },
 };
 const ALL_FIELDS = Object.values(SECTIONS).flatMap(s => s.fields);
+const OPTIONAL_FIELDS = new Set(['fport']);   // added later: configs saved without it still count as complete (default stays)
+
+/* data rate tabs: By Datarate and Manual edit the same sf/bw values */
+function setTab(t) {
+  for (const n of ['dr', 'manual']) {
+    const on = n === t;
+    $('tab-' + n).setAttribute('aria-selected', on); $('tab-' + n).tabIndex = on ? 0 : -1;
+    $('panel-' + n).hidden = !on;
+  }
+  try { localStorage.setItem(STORE_TAB, t); } catch {}
+}
+function syncDr() {
+  const dr = DR_TABLE[`${$('sf').value}/${$('bw').value}`];
+  $('dr').value = dr === undefined ? '' : dr;
+}
+$('tab-dr').onclick = () => setTab('dr');
+$('tab-manual').onclick = () => setTab('manual');
+$('tab-dr').parentElement.addEventListener('keydown', e => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  const t = $('tab-dr').getAttribute('aria-selected') === 'true' ? 'manual' : 'dr';
+  setTab(t); $('tab-' + t).focus();
+});
+$('dr').addEventListener('change', () => {
+  const d = RP_DR.find(x => String(x.dr) === $('dr').value);
+  if (!d) return;
+  $('sf').value = d.sf; $('bw').value = d.bw;
+  clearErr('radio'); updateSection('radio');     // programmatic changes fire no input event
+});
+$('sf').addEventListener('input', syncDr);
+$('bw').addEventListener('input', syncDr);
+try { setTab(localStorage.getItem(STORE_TAB) === 'manual' ? 'manual' : 'dr'); } catch { setTab('dr'); }
 
 // index of the nearest valid TX power step; a tie goes to the higher power
 function snapTxp(dbm) {
@@ -245,6 +326,10 @@ const VALIDATE = {
     if (!isFinite(dbm)) throw new FieldError('txpDbm', 'TX power must be a number in dBm');
     v.txp = snapTxp(dbm);               // AT+TXP index
     v.dbm = TXP_DBM[v.txp];             // snapped value, shown and sent in the payload
+    const fpText = $('fport').value.trim();
+    v.fport = Number(fpText);
+    if (fpText === '' || !Number.isInteger(v.fport) || v.fport < 1 || v.fport > FPORT_MAX)
+      throw new FieldError('fport', `FPort must be 1-${FPORT_MAX}`);
     v.sf  = parseInt($('sf').value, 10);
     v.bw  = parseInt($('bw').value, 10);
     v.cr  = $('cr').value;
@@ -270,7 +355,7 @@ const VALIDATE = {
 
 const SUMMARY = {
   keys:  s => `DevAddr ${s.devaddr.toUpperCase()} · keys set`,
-  radio: s => `${s.region} · SF${s.sf}/${s.bw} kHz · CR ${s.cr} · ${s.txpDbm} dBm`,
+  radio: s => `${s.region} · DR${DR_TABLE[`${s.sf}/${s.bw}`]} (SF${s.sf}/${s.bw} kHz) · CR ${s.cr} · ${s.txpDbm} dBm · FPort ${s.fport}`,
   test:  s => `Cfg ${s.cfgId} · Seq ${s.seqId} · ${s.total} pkts / ${s.interval} s`,
 };
 
@@ -289,7 +374,10 @@ function clearErr(sec) {
 }
 function showErr(sec, e) {
   $('err-' + sec).textContent = e.message;
-  if (e.field) { $(e.field).setAttribute('aria-invalid', 'true'); $(e.field).focus(); }
+  if (e.field) {
+    if (['sf', 'bw', 'cr'].includes(e.field)) setTab('manual');   // the field must be visible to take focus
+    $(e.field).setAttribute('aria-invalid', 'true'); $(e.field).focus();
+  }
 }
 
 function readStored() { try { return JSON.parse(localStorage.getItem(STORE_CFG) || '{}'); } catch { return {}; } }
@@ -306,8 +394,9 @@ function saveSection(sec) {
 function loadCfg() {
   const c = readStored();
   ALL_FIELDS.forEach(k => { if (c[k] !== undefined) $(k).value = c[k]; });
+  syncDr();
   for (const sec of Object.keys(SECTIONS)) {
-    const complete = SECTIONS[sec].fields.every(k => c[k] !== undefined);
+    const complete = SECTIONS[sec].fields.every(k => c[k] !== undefined || OPTIONAL_FIELDS.has(k));
     let ok = false;
     if (complete) { try { VALIDATE[sec](); ok = true; } catch {} }
     if (ok) snap[sec] = valuesOf(sec);
@@ -386,7 +475,7 @@ function refreshUi() {
   $('start').disabled = !connected || running;
   $('stop').disabled = !running;
   $('rawSend').disabled = !connected || running;
-  [...ALL_FIELDS, 'loc', 'floor', 'floorUp', 'floorDown'].forEach(k => $(k).disabled = running);
+  [...ALL_FIELDS, 'dr', 'loc', 'floor', 'floorUp', 'floorDown'].forEach(k => $(k).disabled = running);
   document.querySelectorAll('button.save').forEach(b => b.disabled = running);
   $('sum-conn').textContent = connected ? `Connected: ${dev && dev.name || ''}` : 'Not connected';
 }
@@ -482,6 +571,8 @@ $('scan').onclick = () => {
 };
 $('disc').onclick = () => dev && dev.gatt.connected && dev.gatt.disconnect();
 
+$('saveLog').onclick = saveLog;
+
 $('rawSend').onclick = async () => {
   const c = $('raw').value.trim(); if (!c) return;
   setupSig = null;        // a raw command may change device settings; re-apply setup on the next run
@@ -549,11 +640,11 @@ async function runSetup(p) {
   log('[setup done]\n');
 }
 
-async function sendWithRetry(hex) {
+async function sendWithRetry(hex, fport) {
   let lastErr;
   for (let attempt = 1; attempt <= 3; attempt++) {
     if (stopFlag) return false;
-    try { await cmd(`AT+SEND=${LORAWAN_PORT}:${hex}`, 20000); return true; }
+    try { await cmd(`AT+SEND=${fport}:${hex}`, 20000); return true; }
     catch (e) { lastErr = e; log(`[send failed ${attempt}/3] ${e.message}\n`); await sleep(3000); }
   }
   throw lastErr;
@@ -601,7 +692,7 @@ async function startTest() {
       const hex = buildPayload(p, n);
       log(`[tx ${n + 1}/${p.total}] ${hex}\n`);
       setStatus(`Sending ${n + 1} / ${p.total} at ${p.loc}`, 'busy');
-      if (!(await sendWithRetry(hex))) break;
+      if (!(await sendWithRetry(hex, p.fport))) break;
       sent = n + 1; setProgress(sent, p.total);
       if (n < p.total - 1) {
         setStatus(`Sent ${sent} / ${p.total} at ${p.loc}, next in ${p.interval} s`, 'busy');

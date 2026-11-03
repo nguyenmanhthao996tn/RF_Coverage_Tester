@@ -12,7 +12,7 @@ elsewhere and are out of scope.
 ## Layout
 
 - `src/rak11720_rui3_firmware/rak11720_rui3_firmware.ino` - Arduino IDE sketch. Pure BLE (Nordic UART) <-> AT command bridge.
-- `src/web_control/index.html` - single-file Web Bluetooth control page. No build step, no dependencies.
+- `src/web_control/www/index.html` - single-file Web Bluetooth control page. No build step, no dependencies.
 - `src/web_control/docker-compose.yml` - Hosting: BusyBox httpd serving the folder on 127.0.0.1:8080, fronted by `tailscale serve` for HTTPS. Not yet run on the LXC from this repo.
 - `docs/uplink_packet_format.txt` - 14-byte test payload. **Source of truth** for the payload.
 - `docs/rak_rui3_at_commands.txt` - RUI3 AT command reference (full list, including `AT+BAND` indices). Not an app input; just reference.
@@ -20,7 +20,7 @@ elsewhere and are out of scope.
 ## Fixed test constraints (do not change)
 
 - Hardware: RAK11720 plus battery. Nothing else.
-- ABP only (`AT+NJM=0`), Class A, region **AS923-2** (`AT+BAND=9`), LoRaWAN port 2.
+- ABP only (`AT+NJM=0`), Class A, region **AS923-2** (`AT+BAND=9`), LoRaWAN FPort default 2 (configurable on the page, 1-223).
 - ADR off (`AT+ADR=0`) and unconfirmed uplinks (`AT+CFM=0`) are mandatory for a coverage test.
 - Uplink only. No downlinks, no other test types planned.
 - ABP frame-counter reset is handled on the ChirpStack side, not here.
@@ -45,7 +45,9 @@ elsewhere and are out of scope.
 - Web Bluetooth needs a secure context (HTTPS or `localhost`; `file://` will not work, and `http://<tailscale-ip>` is not secure). Hosted on a Proxmox LXC via `src/web_control/docker-compose.yml` plus `tailscale serve --bg 8080` on the host. Deploy: `git pull && docker compose up -d` in `src/web_control`.
 - Target: **mobile first**, Chrome on Android primary, Windows Chrome secondary. iOS is not supported by Web Bluetooth.
 - Keep it a single dependency-free `index.html`. No frameworks or build tooling for now.
-- Page structure: a run card at the top (Location ID, Start/Stop, progress, status line) and collapsible settings sections below (Connection, Device keys, LoRa parameters, Test setup, Debug). Each settings section has its own Save button that validates, stores and collapses it; Start refuses to run while a section is unsaved. The Debug section (raw AT, log) is collapsed by default.
+- Page structure: a run card at the top (Location ID, Start/Stop, progress, status line) and collapsible settings sections below (Connection, Device keys, LoRa parameters, Test setup, Debug). Each settings section has its own Save button that validates, stores and collapses it; Start refuses to run while a section is unsaved. The Debug section (raw AT, log, Save log) is collapsed by default.
+- LoRa parameters section: Region, FPort and TX power sit above two tabs, `By Datarate` (list of LoRaWAN Regional Parameters DR0-DR6) and `Manual` (SF/BW/CR). The tabs edit the same sf/bw values; the saved state is sf/bw, and switching tabs does not mark the section unsaved. FPort is not part of the setup signature (it only goes into `AT+SEND`), and a stored config without it keeps the default 2.
+- Log lines carry a `HH:MM:SS.mmm` timestamp; Save log writes a `.txt` with full date and time per line. Any 32-hex token (ABP keys) is masked as `<key hidden>` in the log and the file.
 - DevEUI is not used: ABP uplinks never carry it, so the page neither asks for it nor sends `AT+DEVEUI` (unverified on a real unit; the module keeps its factory DevEUI).
 - `runSetup()` runs only on the first Start of a connection or when keys/region/DR/TX power changed (or after a raw AT command), not before every run.
 - Per-spot inputs sit outside the saved sections. Location ID is deliberately not persisted. Floor level (0-255, stepper, payload byte 13) is persisted, starts empty, and Start requires it.
@@ -64,7 +66,7 @@ elsewhere and are out of scope.
 
 - **TX power**: implemented. The page takes dBm in a number box, snaps to the nearest step of `TXP_DBM` (16 to 2 dBm; a tie goes to the higher power, out-of-range values clamp), shows the snapped value and the `AT+TXP` index, and sends the snapped dBm in payload byte 2. It rests on the unverified mapping below.
 - **Index to dBm mapping is unverified**: `AT+TXP` on AS923 is 0-7 (0 = highest). Assumed mapping is `dBm = 16 - 2 * index` (16, 14, ... 2). RAK's AT manual defers to a regional-parameters appendix. Confirm via the appendix or by measuring a unit. The LoRaWAN stack caps power below the SX1262's +22 dBm, so `AT+TXP` cannot reach the radio's full range.
-- **Data rate list likely too wide**: RAK's manual says `AT+DR` on AS923 accepts DR2-DR5 only (SF10-SF7 at 125 kHz). `DR_TABLE` also offers SF11/SF12 (DR0/DR1) and SF7/250 kHz (DR6), which may fail with `AT_PARAM_ERROR`. Test on a unit, then restrict the SF/BW options, and update the payload doc if the SF range changes.
+- **Data rate list likely too wide**: RAK's manual says `AT+DR` on AS923 accepts DR2-DR5 only (SF10-SF7 at 125 kHz). `RP_DR` (the By Datarate list, also behind `DR_TABLE`) also offers SF11/SF12 (DR0/DR1) and SF7/250 kHz (DR6), which may fail with `AT_PARAM_ERROR`. Test on a unit, then trim `RP_DR` and the SF/BW options, and update the payload doc if the SF range changes. The `RP_DR` values are from memory of the Regional Parameters, not checked against the spec text.
 - **Mobile layout**: restructured (sections, large Start/Stop, status line, wake lock, vibration) but only checked in a desktop-emulated phone viewport. Wake lock, vibration and the BLE flow are untested on a real Android phone.
 - **ABP keys in `localStorage`**: stored in plain text in the browser. Acceptable for dev; revisit for production.
 - **RUI3 BSP version**: not recorded (see Build and flash).
