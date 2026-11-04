@@ -8,3 +8,17 @@ Byte 6-8:   Location ID, 3 ASCII characters, e.g. "A12".
 Byte 9-10:  Total TX packets in this sequence. Unsigned 16-bit, big-endian.
 Byte 11-12: Current TX packet count, starting from 0. Unsigned 16-bit, big-endian.
 Byte 13: The current floor level.
+
+P2P mode (optional, see CLAUDE.md)
+The 14 bytes above do not change. In P2P mode the page wraps them in a LoRaWAN 1.0.x unconfirmed
+uplink and sends the whole frame as raw LoRa with AT+PSEND:
+  MHDR 0x40 | DevAddr (4, little endian) | FCtrl 0x00 | FCnt (2, low 16 bits, little endian)
+  | FPort (1) | FRMPayload (the 14 bytes, encrypted with AppSKey) | MIC (4, NwkSKey)
+= 27 bytes on air. FCnt is a 32-bit counter in the encryption and the MIC; packet n of a run uses
+Starting FCnt + n. Byte 11-12 above (current TX packet count) restarts at 0 in every run; FCnt does not.
+Radio the gateway needs: LoRaWAN public sync word 0x3444, preamble 8, CR 4/5, explicit header, CRC on, IQ not
+inverted. The page sets what the AT commands allow; that the module really sends CRC and an explicit header is
+unverified (no AT command for either).
+Byte 2 (TX power) is the dBm passed to AT+TXOUTPUTPOWER (5 to 22). Bytes 3-5 (SF, BW, CR) are the
+values set on the module; in P2P mode the SF/BW pair is still one of the LoRaWAN data rates (SF7-SF12 at
+125 kHz, SF7 at 250 kHz), so the SF range of byte 3 stays 7-12.

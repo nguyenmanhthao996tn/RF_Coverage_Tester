@@ -1,0 +1,463 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Page tests with a fake RAK11720</title>
+<style>
+  body { font: 14px monospace; margin: 12px; }
+  li.pass { color: #2e7d32; } li.fail { color: #c62828; font-weight: bold; }
+  h3 { margin: 14px 0 2px; } iframe { position: absolute; left: -9999px; }
+  #summary { font-size: 18px; font-weight: bold; margin: 10px 0; }
+</style>
+<h2>index.html against a fake RAK11720 (no hardware)</h2>
+<div id="summary">running...</div>
+<ul id="out"></ul>
+<script>
+/* Serve the folder src/web_control over http (Web Bluetooth/crypto need a secure context, localhost counts):
+     python -m http.server 8099      (run inside src/web_control)
+   then open http://localhost:8099/test/page_harness.html . The result is in #summary and the list below.
+   Each scenario loads www/index.html into a fresh iframe whose navigator.bluetooth is a fake Nordic-UART module.
+   Time inside the iframe runs 10x faster (setTimeout and Date.now are scaled), so a 25 s reconnect window costs 2.5 s. */
+
+const SCALE = 10;
+const DUMMY = { devaddr: '26011BDA', nwk: '00112233445566778899AABBCCDDEEFF', app: 'FFEEDDCCBBAA99887766554433221100' };
+
+/* ---------- injected into the page before its own script ---------- */
+function injected(opts, scale) {
+  const realNow = Date.now.bind(Date), T0 = realNow(), rST = window.setTimeout.bind(window);
+  window.setTimeout = (f, ms, ...a) => rST(f, (ms || 0) / scale, ...a);
+  Date.now = () => T0 + (realNow() - T0) * scale;
+  window.confirm = () => true;
+
+  const LONG = { PFREQ: 'RFFREQUENCY', PSF: 'SPREADINGFACTOR', PBW: 'BANDWIDTH', PCR: 'CODINGRATE', PPL: 'PREAMBLELENGTH', PTP: 'TXOUTPUTPOWER' };
+  const P2P_NAMES = new Set(['SYNCWORD', 'RFFREQUENCY', 'SPREADINGFACTOR', 'BANDWIDTH', 'CODINGRATE', 'PREAMBLELENGTH', 'TXOUTPUTPOWER', 'IQINVER', 'ENCRY', 'CAD', 'FIXLENGTHPAYLOAD']);
+  const LW_NAMES = new Set(['NJM', 'CLASS', 'BAND', 'DEVADDR', 'NWKSKEY', 'APPSKEY', 'ADR', 'CFM', 'DR', 'TXP']);
+  const mod = window.__mod = {
+    nwm: opts.nwm ?? '1', params: {}, log: [], psend: [], send: [], bootMs: opts.bootMs ?? 1500, upAt: 0,
+    failReconnect: !!opts.failReconnect, noDone: !!opts.noDone, skipDone: opts.skipDone || 0, failPsend: opts.failPsend || 0,
+    unsupportedLong: new Set(opts.unsupportedLong || []), mismatch: opts.mismatch || {}, doneMs: opts.doneMs ?? 400,
+    reboots: 0,
+    drop() { gatt.disconnect(); },
+  };
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  const tx = new EventTarget();
+  tx.startNotifications = async () => tx;
+  const emit = line => {
+    const b = enc.encode(line + '\r\n');
+    for (let i = 0; i < b.length; i += 20) { tx.value = new DataView(b.slice(i, i + 20).buffer); tx.dispatchEvent(new Event('characteristicvaluechanged')); }
+  };
+  // short replies use a microtask: timers in a background tab are throttled to 1 s and would trip the page's command timeouts
+  const later = (ms, f) => (ms <= 10 ? Promise.resolve().then(f) : setTimeout(f, ms));
+  const reboot = () => later(300, () => {
+    mod.reboots++; mod.upAt = mod.failReconnect ? Infinity : Date.now() + mod.bootMs; gatt.disconnect();
+  });
+  let buf = '';
+  function handle(line) {
+    mod.log.push(line);
+    const ok = () => later(5, () => emit('OK')), err = e => later(5, () => emit(e));
+    if (line === 'AT') return ok();
+    if (line === 'ATR') { ok(); return reboot(); }
+    let m = /^AT\+PSEND=([0-9A-Fa-f]+)$/.exec(line);
+    if (m) {
+      if (mod.nwm !== '0') return err('AT_MODE_NO_SUPPORT');
+      if (mod.failPsend > 0) { mod.failPsend--; return err('AT_BUSY_ERROR'); }
+      mod.psend.push(m[1].toUpperCase()); ok();
+      if (mod.noDone) return;
+      if (mod.skipDone > 0) { mod.skipDone--; return; }
+      return later(mod.doneMs, () => emit('+EVT:TXP2P DONE'));
+    }
+    m = /^AT\+SEND=(\d+):([0-9A-Fa-f]+)$/.exec(line);
+    if (m) { if (mod.nwm !== '1') return err('AT_MODE_NO_SUPPORT'); mod.send.push({ fport: +m[1], hex: m[2].toUpperCase() }); return ok(); }
+    m = /^AT\+(\w+)=(.*)$/.exec(line);
+    if (!m) return err('AT_ERROR');
+    let [, name, val] = m;
+    if (name === 'NWM') {
+      if (val === '?') { later(5, () => { emit(`AT+NWM=${mod.nwm}`); emit('OK'); }); return; }
+      if (val !== '0' && val !== '1') return err('AT_PARAM_ERROR');
+      ok(); mod.nwm = val; return reboot();
+    }
+    const canon = LONG[name] || name;
+    if (LONG[name] === undefined && mod.unsupportedLong.has(name)) return err('AT_ERROR');
+    const known = P2P_NAMES.has(canon) || LW_NAMES.has(canon);
+    if (!known) return err('AT_ERROR');
+    if ((P2P_NAMES.has(canon) && mod.nwm !== '0') || (LW_NAMES.has(canon) && mod.nwm !== '1')) return err('AT_MODE_NO_SUPPORT');
+    if (val === '?') {
+      if (mod.params[canon] === undefined) return err('AT_ERROR');
+      later(5, () => { emit(`AT+${name}=${mod.params[canon]}`); emit('OK'); }); return;
+    }
+    mod.params[canon] = mod.mismatch[canon] ?? val; mod.paramLog = (mod.paramLog || []).concat(line);
+    return ok();
+  }
+  const rx = {
+    async writeValueWithoutResponse(data) {
+      buf += dec.decode(data, { stream: true });
+      let i; while ((i = buf.search(/\r\n/)) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 2); if (l) later(0, () => handle(l)); }
+    },
+  };
+  const svc = { getCharacteristic: async u => (u.includes('6e400002') ? rx : tx) };
+  const server = { getPrimaryService: async () => svc };
+  const device = new EventTarget();
+  const gatt = {
+    connected: false,
+    async connect() {
+      if (Date.now() < mod.upAt) throw new Error('device is rebooting');
+      gatt.connected = true; return server;
+    },
+    disconnect() { if (gatt.connected) { gatt.connected = false; device.dispatchEvent(new Event('gattserverdisconnected')); } },
+  };
+  Object.assign(device, { id: 'fake-device-0001', name: 'TTLab.CoverageTester-FAKE', gatt });
+  Object.defineProperty(navigator, 'bluetooth', { configurable: true, value: {
+    requestDevice: async () => device,
+    getDevices: async () => [device],
+  } });
+}
+
+/* ---------- harness plumbing ---------- */
+let htmlSrc;
+const sleepR = ms => new Promise(r => setTimeout(r, ms));
+const hexBytes = h => Uint8Array.from(h.match(/../g) || [], b => parseInt(b, 16));
+async function until(pred, ms, what) {
+  const t0 = performance.now();
+  while (!pred()) { if (performance.now() - t0 > ms) throw new Error('timeout waiting for ' + what); await sleepR(20); }
+}
+async function newPage(opts = {}, storage = null) {
+  if (storage === null || storage === 'clear') localStorage.clear();
+  if (storage && storage !== 'clear' && storage !== 'keep') { localStorage.clear(); for (const [k, v] of Object.entries(storage)) localStorage.setItem(k, v); }
+  const f = document.createElement('iframe');
+  f.srcdoc = htmlSrc.replace('<title>', `<script>(${injected})(${JSON.stringify(opts)}, ${SCALE})<\/script><title>`);
+  document.body.append(f);
+  await new Promise(r => f.onload = r);
+  const w = f.contentWindow;
+  const pg = { f, w, mod: w.__mod, $: id => w.document.getElementById(id), ev: s => w.eval(s) };
+  await sleepR(50);
+  return pg;
+}
+function setv(pg, id, v) { const e = pg.$(id); e.value = v; e.dispatchEvent(new Event('input', { bubbles: true })); }
+function setc(pg, id, on) { const e = pg.$(id); e.checked = on; e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); }
+function save(pg, sec) { pg.w.document.querySelector(`button.save[data-sec=${sec}]`).click(); return pg.$('err-' + sec).textContent; }
+function configure(pg, o = {}) {
+  const c = { p2p: false, freq: '921.4', fcnt: '0', sf: '10', bw: '125', dbm: '14', fport: '2', total: '3', interval: '1', ...o };
+  setv(pg, 'devaddr', DUMMY.devaddr); setv(pg, 'nwkskey', DUMMY.nwk); setv(pg, 'appskey', DUMMY.app);
+  let e = save(pg, 'keys');
+  setc(pg, 'p2p', c.p2p);
+  setv(pg, 'fport', c.fport); setv(pg, 'freq', c.freq); setv(pg, 'fcnt', c.fcnt); setv(pg, 'txpDbm', c.dbm);
+  setv(pg, 'sf', c.sf); setv(pg, 'bw', c.bw);
+  e += save(pg, 'radio');
+  setv(pg, 'cfgId', '0'); setv(pg, 'seqId', '0'); setv(pg, 'total', c.total); setv(pg, 'interval', c.interval);
+  e += save(pg, 'test');
+  setv(pg, 'floor', '2'); setv(pg, 'loc', 'A12');
+  return e;
+}
+async function connect(pg) { pg.$('scan').click(); await until(() => pg.ev('connected'), 3000, 'connect'); await sleepR(30); }
+const status = pg => pg.$('statusLine').textContent;
+async function start(pg) {
+  pg.$('start').click(); await sleepR(40);
+  await until(() => !pg.ev('running'), 40000, 'run to finish'); await sleepR(30);
+  return status(pg);
+}
+async function decode(pg, frameHex, fcnt32, keys = DUMMY) {   // independent of lorawanUplink: own A-block, via the page's AES
+  const b = hexBytes(frameHex), n = b.length;
+  const le = (a, p) => (a[p] | a[p + 1] << 8 | a[p + 2] << 16 | a[p + 3] << 24) >>> 0;
+  const out = { mhdr: b[0], addr: le(b, 1), fctrl: b[5], fcnt16: b[6] | b[7] << 8, fport: b[8], len: n };
+  const enc = b.slice(9, n - 4), pl = new Uint8Array(enc.length);
+  for (let i = 0; i < enc.length; i += 16) {
+    const A = new Uint8Array(16); A[0] = 1;
+    const addr = parseInt(keys.devaddr, 16) >>> 0;
+    for (let k = 0; k < 4; k++) { A[6 + k] = (addr >>> 8 * k) & 255; A[10 + k] = (fcnt32 >>> 8 * k) & 255; }
+    A[15] = i / 16 + 1;
+    const S = await pg.w.aesBlock(keys.app, A);
+    for (let j = 0; j < Math.min(16, enc.length - i); j++) pl[i + j] = enc[i + j] ^ S[j];
+  }
+  out.payload = [...pl];
+  const B0 = new Uint8Array(16 + n - 4); B0[0] = 0x49; B0[15] = n - 4;
+  const addr = parseInt(keys.devaddr, 16) >>> 0;
+  for (let k = 0; k < 4; k++) { B0[6 + k] = (addr >>> 8 * k) & 255; B0[10 + k] = (fcnt32 >>> 8 * k) & 255; }
+  B0.set(b.slice(0, n - 4), 16);
+  const mac = await pg.w.aesCmac(keys.nwk, B0);
+  out.micOk = [...mac.slice(0, 4)].join() === [...b.slice(n - 4)].join();
+  return out;
+}
+
+/* ---------- reporting ---------- */
+let pass = 0, fail = 0, cur;
+function section(name) { cur = document.createElement('li'); cur.innerHTML = `<h3>${name}</h3><ul></ul>`; document.getElementById('out').append(cur); }
+function T(name, cond, extra = '') {
+  const li = document.createElement('li'); li.className = cond ? 'pass' : 'fail';
+  li.textContent = `${cond ? 'PASS' : 'FAIL'} ${name}${cond || extra === '' ? '' : '  -> ' + extra}`;
+  cur.querySelector('ul').append(li); cond ? pass++ : fail++;
+}
+const logOf = pg => pg.mod.log;
+const idx = (pg, s) => logOf(pg).indexOf(s);
+
+/* ---------- scenarios ---------- */
+const scenarios = [];
+const sc = (name, fn) => scenarios.push([name, fn]);
+
+sc('B1 LoRaWAN mode is unchanged (regression)', async () => {
+  const pg = await newPage();
+  T('config saves without errors', configure(pg, { dbm: '14' }) === '');
+  T('FCnt and Frequency boxes disabled, Region enabled', pg.$('fcnt').disabled && pg.$('freq').disabled && !pg.$('region').disabled);
+  await connect(pg);
+  const s = await start(pg);
+  T('run finishes', /^Done: 3 \/ 3/.test(s), s);
+  T('3 x AT+SEND on FPort 2, 28 hex chars each', pg.mod.send.length === 3 && pg.mod.send.every(x => x.fport === 2 && x.hex.length === 28), JSON.stringify(pg.mod.send));
+  T('AT+NJM=0, BAND=9, ADR=0, CFM=0, DR=2, TXP=1 sent', ['AT+NJM=0', 'AT+BAND=9', 'AT+ADR=0', 'AT+CFM=0', 'AT+DR=2', 'AT+TXP=1'].every(c => logOf(pg).includes(c)));
+  T('no P2P commands, module stayed in LoRaWAN mode', !logOf(pg).some(l => /PSEND|SYNCWORD|NWM=0/.test(l)) && pg.mod.nwm === '1' && pg.mod.reboots === 0);
+  T('FCnt box not touched', pg.$('fcnt').value === '0');
+});
+
+sc('B2 P2P checkbox toggles the inputs', async () => {
+  const pg = await newPage();
+  setc(pg, 'p2p', true);
+  T('on: Region disabled, Frequency and FCnt enabled, note shown', pg.$('region').disabled && !pg.$('freq').disabled && !pg.$('fcnt').disabled && !pg.$('p2pNote').hidden);
+  T('on: TX power hint switched to the P2P range', /5 to 22/.test(pg.$('txpHint').textContent), pg.$('txpHint').textContent);
+  T('on: TX power arrows range is 5-22', pg.$('txpDbm').min === '5' && pg.$('txpDbm').max === '22', `${pg.$('txpDbm').min}-${pg.$('txpDbm').max}`);
+  setv(pg, 'txpDbm', '22'); pg.$('txpDbm').stepDown(); T('on: stepDown from 22 gives 21 (not clamped to 16)', pg.$('txpDbm').value === '21', pg.$('txpDbm').value);
+  setv(pg, 'txpDbm', '16'); pg.$('txpDbm').stepUp(); T('on: stepUp from 16 gives 17', pg.$('txpDbm').value === '17', pg.$('txpDbm').value);
+  T('on: data-rate hint no longer talks about the LoRaWAN DR2-DR5 limit', !/DR2-DR5/.test(pg.$('drHint').textContent));
+  setc(pg, 'p2p', false);
+  T('off: reverted', !pg.$('region').disabled && pg.$('freq').disabled && pg.$('fcnt').disabled && pg.$('p2pNote').hidden);
+  T('off: TX power arrows range is back to 2-16', pg.$('txpDbm').min === '2' && pg.$('txpDbm').max === '16', `${pg.$('txpDbm').min}-${pg.$('txpDbm').max}`);
+  T('off: LoRaWAN data-rate hint is back', /DR2-DR5/.test(pg.$('drHint').textContent));
+});
+
+sc('B3 stored config from before P2P existed still loads', async () => {
+  const old = { devaddr: DUMMY.devaddr, nwkskey: DUMMY.nwk, appskey: DUMMY.app, region: 'AS923-2', txpDbm: '16', cr: '4/5', sf: '7', bw: '125', cfgId: '0', seqId: '0', total: '20', interval: '2' };
+  const pg = await newPage({}, { lora_test_cfg: JSON.stringify(old) });
+  T('P2P unchecked', !pg.$('p2p').checked);
+  T('radio section counts as saved and collapsed', !pg.$('sec-radio').open && pg.$('dirty-radio').hidden && /^AS923-2/.test(pg.$('sum-radio').textContent), pg.$('sum-radio').textContent);
+  T('defaults: freq 921.4, FCnt 0', pg.$('freq').value === '921.4' && pg.$('fcnt').value === '0');
+});
+
+sc('B4 validation of the P2P fields', async () => {
+  const pg = await newPage();
+  configure(pg, { p2p: true });
+  const cases = [
+    ['fcnt', '', 'blank FCnt'], ['fcnt', '-1', 'FCnt -1'], ['fcnt', '4294967296', 'FCnt 2^32'], ['fcnt', '1.5', 'FCnt 1.5'],
+    ['freq', '', 'blank frequency'], ['freq', '149.9', 'frequency 149.9'], ['freq', '960.1', 'frequency 960.1'], ['freq', 'abc', 'frequency abc'],
+    ['txpDbm', '4', 'P2P power 4'], ['txpDbm', '23', 'P2P power 23'], ['txpDbm', '10.5', 'P2P power 10.5'],
+  ];
+  const good = { fcnt: '0', freq: '921.4', txpDbm: '14' };
+  for (const [id, v, name] of cases) {
+    setv(pg, id, v); const e = save(pg, 'radio');
+    T(`${name} refused`, e !== '' && pg.$(id).getAttribute('aria-invalid') === 'true', e || '(no error)');
+    setv(pg, id, good[id]);
+  }
+  T('good values save', save(pg, 'radio') === '');
+  setv(pg, 'fcnt', '4294967295'); T('FCnt 4294967295 accepted', save(pg, 'radio') === '');
+  setv(pg, 'freq', '921.4'); setv(pg, 'txpDbm', '22'); T('power 22 accepted', save(pg, 'radio') === '');
+});
+
+sc('B5 unsaved P2P change blocks Start', async () => {
+  const pg = await newPage();
+  configure(pg, { p2p: true });
+  await connect(pg);
+  setv(pg, 'freq', '921.6');
+  const s = await start(pg);
+  T('Start refuses and asks to Save', /Save the "LoRa parameters"/.test(s), s);
+  T('nothing sent to the module', pg.mod.log.length === 0, pg.mod.log.join('|'));
+});
+
+sc('B6 P2P run from LoRaWAN mode: mode switch, setup, FCnt +1 per uplink', async () => {
+  const pg = await newPage({ nwm: '1' });
+  T('config saves', configure(pg, { p2p: true, fcnt: '100', total: '3', interval: '1' }) === '');
+  await connect(pg);
+  const s = await start(pg);
+  T('run finishes', /^Done: 3 \/ 3/.test(s), s);
+  T('module was switched to P2P once (reboot) and the page reconnected', pg.mod.nwm === '0' && pg.mod.reboots === 1);
+  T('AT+NWM=0 comes before the first P2P setting', idx(pg, 'AT+NWM=0') >= 0 && idx(pg, 'AT+NWM=0') < idx(pg, 'AT+SYNCWORD=3444'));
+  const P = pg.mod.params;
+  T('sync word 3444 (LoRaWAN public)', P.SYNCWORD === '3444');
+  T('frequency 921400000 Hz', P.RFFREQUENCY === '921400000', P.RFFREQUENCY);
+  T('SF10, BW code 0, CR 0, preamble 8, 14 dBm', P.SPREADINGFACTOR === '10' && P.BANDWIDTH === '0' && P.CODINGRATE === '0' && P.PREAMBLELENGTH === '8' && P.TXOUTPUTPOWER === '14', JSON.stringify(P));
+  T('IQ not inverted, encryption off, CAD off, variable length', P.IQINVER === '0' && P.ENCRY === '0' && P.CAD === '0' && P.FIXLENGTHPAYLOAD === '0');
+  T('no LoRaWAN stack commands, no AT+SEND', !logOf(pg).some(l => /^AT\+(SEND|NJM|BAND|DEVADDR|NWKSKEY|APPSKEY|ADR|CFM|DR|TXP)=/.test(l)));
+  T('keys never sent to the module', !logOf(pg).some(l => l.includes(DUMMY.nwk) || l.includes(DUMMY.app)));
+  T('3 frames sent', pg.mod.psend.length === 3);
+  for (let n = 0; n < pg.mod.psend.length; n++) {
+    const d = await decode(pg, pg.mod.psend[n], 100 + n);
+    T(`frame ${n}: unconfirmed uplink, DevAddr, FCtrl 0, 27 bytes`, d.mhdr === 0x40 && d.addr === 0x26011BDA && d.fctrl === 0 && d.len === 27, JSON.stringify(d));
+    T(`frame ${n}: FCnt ${100 + n} on air, FPort 2, MIC valid`, d.fcnt16 === 100 + n && d.fport === 2 && d.micOk);
+    const exp = [0, 0, 14, 10, 0, 1, 0x41, 0x31, 0x32, 0, 3, 0, n, 2];
+    T(`frame ${n}: decrypted payload is the 14-byte test payload`, d.payload.join() === exp.join(), d.payload.join());
+  }
+  T('FCnt box shows the next unused number (103)', pg.$('fcnt').value === '103', pg.$('fcnt').value);
+  T('next FCnt is stored, section not "unsaved"', JSON.parse(localStorage.getItem('lora_test_cfg')).fcnt === '103' && pg.$('dirty-radio').hidden);
+  const text = pg.$('log').textContent;
+  T('log has the frames but no key material', text.includes('frame=') && !text.includes(DUMMY.nwk) && !text.includes(DUMMY.app));
+  // the number carries over to a reload of the page
+  const pg2 = await newPage({}, 'keep');
+  T('after a reload: FCnt 103, P2P on, not "unsaved"', pg2.$('fcnt').value === '103' && pg2.$('p2p').checked && pg2.$('dirty-radio').hidden);
+});
+
+sc('B7 module does not come back after the mode switch', async () => {
+  const pg = await newPage({ nwm: '1', failReconnect: true });
+  configure(pg, { p2p: true });
+  await connect(pg);
+  const s = await start(pg);
+  T('run aborted with a clear reason', /Aborted/.test(s) && /reconnect/.test(s), s);
+  T('no frame sent', pg.mod.psend.length === 0);
+  T('FCnt unchanged', pg.$('fcnt').value === '0');
+});
+
+sc('B8a AT+PSEND accepted but +EVT:TXP2P DONE never comes', async () => {
+  const pg = await newPage({ nwm: '0', noDone: true });
+  configure(pg, { p2p: true, fcnt: '100' });
+  await connect(pg);
+  const s = await start(pg);
+  T('aborted after 3 tries', /Aborted after 0 \/ 3/.test(s), s);
+  T('same frame (same FCnt) was sent 3 times', pg.mod.psend.length === 3 && new Set(pg.mod.psend).size === 1, String(pg.mod.psend.length));
+  T('FCnt box unchanged (100)', pg.$('fcnt').value === '100');
+});
+
+sc('B8b first DONE missing: same FCnt is retried, then the run goes on', async () => {
+  const pg = await newPage({ nwm: '0', skipDone: 1 });
+  configure(pg, { p2p: true, fcnt: '100' });
+  await connect(pg);
+  const s = await start(pg);
+  T('run finishes', /^Done: 3 \/ 3/.test(s), s);
+  const f = [];
+  for (const h of pg.mod.psend) f.push(hexBytes(h)[6]);
+  T('FCnt sequence on air 100,100,101,102', f.join() === '100,100,101,102', f.join());
+  T('next FCnt 103', pg.$('fcnt').value === '103');
+});
+
+sc('B8c AT+PSEND rejected once: retried with the same FCnt', async () => {
+  const pg = await newPage({ nwm: '0', failPsend: 1 });
+  configure(pg, { p2p: true, fcnt: '7' });
+  await connect(pg);
+  const s = await start(pg);
+  T('run finishes', /^Done: 3 \/ 3/.test(s), s);
+  T('FCnt sequence 7,8,9', pg.mod.psend.map(h => hexBytes(h)[6]).join() === '7,8,9', pg.mod.psend.map(h => hexBytes(h)[6]).join());
+});
+
+sc('B9 Stop in the middle of a run', async () => {
+  const pg = await newPage({ nwm: '0' });
+  configure(pg, { p2p: true, fcnt: '50', total: '5' });
+  await connect(pg);
+  pg.$('start').click();
+  await until(() => pg.mod.psend.length >= 2, 20000, '2 frames');
+  pg.$('stop').click();
+  await until(() => !pg.ev('running'), 20000, 'stop'); await sleepR(30);
+  const sent = +/(\d+) \/ 5/.exec(status(pg))[1];
+  T('status says Stopped', /^Stopped/.test(status(pg)), status(pg));
+  T('FCnt box = 50 + packets sent', pg.$('fcnt').value === String(50 + sent), `sent ${sent}, box ${pg.$('fcnt').value}`);
+});
+
+sc('B10 Bluetooth drops in the middle of a run', async () => {
+  const pg = await newPage({ nwm: '0' });
+  configure(pg, { p2p: true, fcnt: '50', total: '5' });
+  await connect(pg);
+  pg.$('start').click();
+  await until(() => pg.mod.psend.length >= 1, 20000, '1 frame');
+  pg.mod.drop();
+  await until(() => !pg.ev('running'), 20000, 'run end'); await sleepR(30);
+  const sent = +/(\d+) \/ 5/.exec(status(pg))[1];
+  T('status says Disconnected', /^Disconnected/.test(status(pg)), status(pg));
+  T('FCnt box = 50 + packets sent', pg.$('fcnt').value === String(50 + sent), `sent ${sent}, box ${pg.$('fcnt').value}`);
+});
+
+sc('B11 interval shorter than the airtime', async () => {
+  const pg = await newPage({ nwm: '0' });
+  configure(pg, { p2p: true, sf: '12', interval: '1' });
+  await connect(pg);
+  const s = await start(pg);
+  T('refused with the airtime in the message', /too short/.test(s) && /1647|1646/.test(s), s);
+  T('nothing sent to the module', pg.mod.log.length === 0, pg.mod.log.join('|'));
+  setv(pg, 'interval', '2'); T('2 s accepted for SF12', save(pg, 'test') === '');
+  const s2 = await start(pg);
+  T('SF12 run finishes', /^Done: 3 \/ 3/.test(s2), s2);
+  const d = await decode(pg, pg.mod.psend[0], 0);
+  T('payload byte 3 says SF12', d.payload[3] === 12 && d.micOk, d.payload.join());
+});
+
+sc('B12 P2P run then LoRaWAN run on one connection', async () => {
+  const pg = await newPage({ nwm: '1' });
+  configure(pg, { p2p: true, fcnt: '10' });
+  await connect(pg);
+  await start(pg);
+  T('first run was P2P', pg.mod.psend.length === 3 && pg.mod.nwm === '0');
+  setc(pg, 'p2p', false); setv(pg, 'txpDbm', '14');
+  T('LoRaWAN settings save', save(pg, 'radio') === '');
+  const s = await start(pg);
+  T('second run finishes', /^Done: 3 \/ 3/.test(s), s);
+  T('module switched back to LoRaWAN (2 reboots in total)', pg.mod.nwm === '1' && pg.mod.reboots === 2, `nwm ${pg.mod.nwm}, reboots ${pg.mod.reboots}`);
+  T('3 x AT+SEND and the stack setup', pg.mod.send.length === 3 && logOf(pg).includes('AT+NJM=0'));
+  T('FCnt box keeps the P2P number (13)', pg.$('fcnt').value === '13', pg.$('fcnt').value);
+});
+
+sc('B13 Reset in either mode', async () => {
+  let pg = await newPage({ nwm: '0' });
+  configure(pg, { p2p: true });
+  await connect(pg);
+  pg.$('devReset').click(); await sleepR(50);
+  await until(() => !pg.ev('busy'), 20000, 'reset'); await sleepR(30);
+  let n = pg.$('devNote').textContent;
+  T('P2P page + P2P module: OK, no mode warning', /Reset OK/.test(n) && /P2P mode/.test(n) && !/next Start switches/.test(n), n);
+  pg = await newPage({ nwm: '0' });
+  configure(pg, { p2p: false });
+  await connect(pg);
+  pg.$('devReset').click(); await sleepR(50);
+  await until(() => !pg.ev('busy'), 20000, 'reset'); await sleepR(30);
+  n = pg.$('devNote').textContent;
+  T('LoRaWAN page + P2P module: OK, says Start will switch', /Reset OK/.test(n) && /next Start switches/.test(n), n);
+});
+
+sc('B14 older command names are used when the long ones are unknown', async () => {
+  const pg = await newPage({ nwm: '0', unsupportedLong: ['RFFREQUENCY', 'SPREADINGFACTOR', 'BANDWIDTH', 'CODINGRATE', 'PREAMBLELENGTH', 'TXOUTPUTPOWER'] });
+  configure(pg, { p2p: true });
+  await connect(pg);
+  const s = await start(pg);
+  T('run finishes', /^Done: 3 \/ 3/.test(s), s);
+  T('AT+PFREQ=921400000 and AT+PSF=10 used', logOf(pg).includes('AT+PFREQ=921400000') && logOf(pg).includes('AT+PSF=10'));
+});
+
+sc('B15 a setting the module did not take aborts the run', async () => {
+  const pg = await newPage({ nwm: '0', mismatch: { RFFREQUENCY: '868000000' } });
+  configure(pg, { p2p: true });
+  await connect(pg);
+  const s = await start(pg);
+  T('aborted, naming the setting', /Aborted/.test(s) && /RFFREQUENCY/.test(s), s);
+  T('no frame sent', pg.mod.psend.length === 0);
+});
+
+sc('B16 FCnt limits', async () => {
+  let pg = await newPage({ nwm: '0' });
+  configure(pg, { p2p: true, fcnt: '4294967295', total: '2' });
+  await connect(pg);
+  let s = await start(pg);
+  T('would pass 2^32-1: refused', /FCnt would pass/.test(s), s);
+  setv(pg, 'fcnt', '4294967295'); setv(pg, 'total', '1'); save(pg, 'test');
+  s = await start(pg);
+  T('exactly the last FCnt: accepted', /^Done: 1 \/ 1/.test(s), s);
+  const d = await decode(pg, pg.mod.psend[0], 4294967295);
+  T('frame has FCnt 0xFFFF on air and a valid MIC for the 32-bit counter', d.fcnt16 === 65535 && d.micOk);
+});
+
+sc('B17 FCnt passes 65535 inside a run', async () => {
+  const pg = await newPage({ nwm: '0' });
+  configure(pg, { p2p: true, fcnt: '65534', total: '4' });
+  await connect(pg);
+  const s = await start(pg);
+  T('run finishes', /^Done: 4 \/ 4/.test(s), s);
+  const lows = [];
+  for (let n = 0; n < pg.mod.psend.length; n++) {
+    const d = await decode(pg, pg.mod.psend[n], 65534 + n);
+    lows.push(d.fcnt16);
+    T(`frame ${n}: MIC valid and payload decrypts with the 32-bit counter ${65534 + n}`, d.micOk && d.payload[12] === n, d.payload.join());
+  }
+  T('on-air FCnt 65534, 65535, 0, 1', lows.join() === '65534,65535,0,1', lows.join());
+  T('box shows 65538', pg.$('fcnt').value === '65538');
+});
+
+/* ---------- run ---------- */
+(async () => {
+  htmlSrc = await (await fetch('../www/index.html')).text();
+  for (const [name, fn] of scenarios) {
+    section(name);
+    document.getElementById('summary').textContent = `running: ${name} (${pass} passed, ${fail} failed so far)`;
+    try { await fn(); } catch (e) { T('scenario ran to the end', false, e.stack || String(e)); }
+    document.querySelectorAll('iframe').forEach(f => f.remove());
+  }
+  document.getElementById('summary').textContent = `DONE: ${pass} passed, ${fail} failed`;
+  document.title = `DONE ${pass} passed ${fail} failed`;
+})();
+</script>

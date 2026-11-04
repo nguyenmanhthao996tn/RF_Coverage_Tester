@@ -20,6 +20,9 @@
   .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 10px; }
   .grid2 .span2 { grid-column:1 / -1; }
   .hint { font-size:13px; color:#555; margin-top:4px; }
+  label.check { display:flex; align-items:center; gap:10px; margin:6px 0 2px; font-size:16px; color:inherit; min-height:44px; }
+  label.check input { width:22px; height:22px; flex:none; }
+  input:disabled, select:disabled { background:#eceff1; color:#78909c; }
   .wide { width:100%; margin-top:8px; }
   .stepper { display:flex; gap:8px; }
   .stepper input { flex:1; min-width:0; text-align:center; font-size:28px; padding:8px; -moz-appearance:textfield; }
@@ -121,9 +124,14 @@
 <details class="sec" id="sec-radio" open>
   <summary><span class="t">3. LoRa/LoRaWAN parameters</span><span class="dirty" id="dirty-radio" hidden>unsaved changes</span><span class="sum" id="sum-radio"></span></summary>
   <div class="body">
+    <label class="check" for="p2p"><input type="checkbox" id="p2p"> Use P2P mode (LoRaWAN frame sent as raw LoRa)</label>
+    <div class="hint" id="p2pHint">Off: the module's LoRaWAN stack sends (AT+SEND). On: this page builds the LoRaWAN uplink (ABP, unconfirmed) and sends it with AT+PSEND, which skips the stack's dwell-time limits. The module is switched to P2P mode (it reboots) and back automatically.</div>
     <div class="grid2">
       <div><label for="region">Region</label><select id="region"></select></div>
       <div><label for="fport">FPort (1-223)</label><input type="number" id="fport" value="2" min="1" max="223" step="1" inputmode="numeric"></div>
+      <div><label for="freq">Frequency (MHz)</label><input type="number" id="freq" value="921.4" min="150" max="960" step="any" inputmode="decimal"></div>
+      <div><label for="fcnt">Starting FCnt</label><input type="number" id="fcnt" value="0" min="0" max="4294967295" step="1" inputmode="numeric"></div>
+      <div class="span2 hint" id="p2pNote">P2P only: the frequency must be a channel the gateway listens on. FCnt goes up by 1 after each uplink, and after a run this box shows the next unused number.</div>
       <div class="span2">
         <label for="txpDbm">TX power (dBm)</label>
         <input type="number" id="txpDbm" value="16" min="2" max="16" step="1" inputmode="numeric">
@@ -137,7 +145,7 @@
     <div class="tabpanel" role="tabpanel" id="panel-dr" aria-labelledby="tab-dr">
       <label for="dr">Data rate</label>
       <select id="dr"></select>
-      <div class="hint">From the LoRaWAN Regional Parameters (not checked against the spec text). DR0, DR1 and DR6 are untested on the RAK11720; RAK's manual lists only DR2-DR5 for AS923.</div>
+      <div class="hint" id="drHint">From the LoRaWAN Regional Parameters (not checked against the spec text). DR0, DR1 and DR6 are untested on the RAK11720; RAK's manual lists only DR2-DR5 for AS923.</div>
     </div>
     <div class="tabpanel" role="tabpanel" id="panel-manual" aria-labelledby="tab-manual" hidden>
       <div class="grid2">
@@ -225,6 +233,14 @@ const BW_CODE = { 125:0, 250:1, 500:2 };   // payload byte 4
 const CR_CODE = { '4/5':1 };               // payload byte 5 (1=4/5 ... 4=4/8)
 // AT+TXP index -> dBm on AS923. UNVERIFIED assumption: dBm = 16 - 2 * index (see CLAUDE.md).
 const TXP_DBM = [16, 14, 12, 10, 8, 6, 4, 2];
+// P2P mode (AT+NWM=0). Ranges from RAK's AT manual; none of this has run on a real unit yet.
+const P2P_TXP_MIN = 5, P2P_TXP_MAX = 22;   // AT+TXOUTPUTPOWER in dBm, sent as typed (no index mapping)
+const P2P_FREQ_MIN = 150, P2P_FREQ_MAX = 960;   // MHz, the module's accepted range
+const FCNT_MAX = 0xFFFFFFFF;               // LoRaWAN FCnt is 32 bits (16 on air)
+const SYNCWORD = '3444';                   // LoRaWAN public sync word; the module default is probably the private 1424
+const P2P_BW_CODE = { 125:0, 250:1 };      // AT+BANDWIDTH codes (payload byte 4 uses the same numbers)
+const P2P_PREAMBLE = 8;                    // LoRaWAN uplink preamble
+const FRAME_BYTES = 27;                    // 13 bytes of LoRaWAN overhead + the 14-byte test payload (airtime estimate)
 
 /* ================= helpers ================= */
 const $ = id => document.getElementById(id);
@@ -275,11 +291,14 @@ class FieldError extends Error { constructor(field, msg) { super(msg); this.fiel
 
 const SECTIONS = {
   keys:  { title: 'Device keys',    fields: ['devaddr', 'nwkskey', 'appskey'] },
-  radio: { title: 'LoRa parameters', fields: ['region', 'fport', 'txpDbm', 'cr', 'sf', 'bw'] },   // the DR select only mirrors sf/bw
+  radio: { title: 'LoRa parameters', fields: ['p2p', 'region', 'fport', 'freq', 'fcnt', 'txpDbm', 'cr', 'sf', 'bw'] },   // the DR select only mirrors sf/bw
   test:  { title: 'Test setup',     fields: ['cfgId', 'seqId', 'total', 'interval'] },
 };
 const ALL_FIELDS = Object.values(SECTIONS).flatMap(s => s.fields);
-const OPTIONAL_FIELDS = new Set(['fport']);   // added later: configs saved without it still count as complete (default stays)
+const OPTIONAL_FIELDS = new Set(['fport', 'p2p', 'freq', 'fcnt']);   // added later: configs saved without them still count as complete (defaults stay)
+// A checkbox is stored as '1' / '0' so it fits the string snapshots used for the dirty check
+const getF = k => { const e = $(k); return e.type === 'checkbox' ? (e.checked ? '1' : '0') : e.value; };
+const setF = (k, v) => { const e = $(k); if (e.type === 'checkbox') e.checked = v === '1'; else e.value = v; };
 
 /* data rate tabs: By Datarate and Manual edit the same sf/bw values */
 function setTab(t) {
@@ -319,6 +338,10 @@ function snapTxp(dbm) {
 }
 function updateTxpHint() {
   const dbm = parseFloat($('txpDbm').value);
+  if ($('p2p').checked) {
+    $('txpHint').textContent = `P2P: whole dBm from ${P2P_TXP_MIN} to ${P2P_TXP_MAX}, sent as AT+TXOUTPUTPOWER`;
+    return;
+  }
   $('txpHint').textContent = isFinite(dbm)
     ? `Will use ${TXP_DBM[snapTxp(dbm)]} dBm (AT+TXP=${snapTxp(dbm)})`
     : 'Valid steps: 2 to 16 dBm in 2 dB steps';
@@ -337,10 +360,26 @@ const VALIDATE = {
     const v = {};
     v.region = REGIONS.find(r => r.name === $('region').value);
     if (!v.region) throw new FieldError('region', 'Choose a region');
+    v.p2p = $('p2p').checked;
     const dbm = parseFloat($('txpDbm').value);
     if (!isFinite(dbm)) throw new FieldError('txpDbm', 'TX power must be a number in dBm');
-    v.txp = snapTxp(dbm);               // AT+TXP index
-    v.dbm = TXP_DBM[v.txp];             // snapped value, shown and sent in the payload
+    if (v.p2p) {
+      if (!Number.isInteger(dbm) || dbm < P2P_TXP_MIN || dbm > P2P_TXP_MAX)
+        throw new FieldError('txpDbm', `P2P TX power must be a whole number from ${P2P_TXP_MIN} to ${P2P_TXP_MAX} dBm`);
+      v.dbm = dbm;
+      const mhzText = $('freq').value.trim();
+      const mhz = Number(mhzText);
+      if (mhzText === '' || !isFinite(mhz) || mhz < P2P_FREQ_MIN || mhz > P2P_FREQ_MAX)
+        throw new FieldError('freq', `Frequency must be ${P2P_FREQ_MIN}-${P2P_FREQ_MAX} MHz`);
+      v.freqHz = Math.round(mhz * 1e6);
+      const fcText = $('fcnt').value.trim();
+      v.fcnt = Number(fcText);
+      if (fcText === '' || !Number.isInteger(v.fcnt) || v.fcnt < 0 || v.fcnt > FCNT_MAX)
+        throw new FieldError('fcnt', `Starting FCnt must be 0-${FCNT_MAX}`);
+    } else {
+      v.txp = snapTxp(dbm);             // AT+TXP index
+      v.dbm = TXP_DBM[v.txp];           // snapped value, shown and sent in the payload
+    }
     const fpText = $('fport').value.trim();
     v.fport = Number(fpText);
     if (fpText === '' || !Number.isInteger(v.fport) || v.fport < 1 || v.fport > FPORT_MAX)
@@ -370,13 +409,15 @@ const VALIDATE = {
 
 const SUMMARY = {
   keys:  s => `DevAddr ${s.devaddr.toUpperCase()} · keys set`,
-  radio: s => `${s.region} · DR${DR_TABLE[`${s.sf}/${s.bw}`]} (SF${s.sf}/${s.bw} kHz) · CR ${s.cr} · ${s.txpDbm} dBm · FPort ${s.fport}`,
+  radio: s => s.p2p === '1'
+    ? `P2P ${s.freq} MHz · DR${DR_TABLE[`${s.sf}/${s.bw}`]} (SF${s.sf}/${s.bw} kHz) · ${s.txpDbm} dBm · FPort ${s.fport} · FCnt ${s.fcnt}`
+    : `${s.region} · DR${DR_TABLE[`${s.sf}/${s.bw}`]} (SF${s.sf}/${s.bw} kHz) · CR ${s.cr} · ${s.txpDbm} dBm · FPort ${s.fport}`,
   test:  s => `Cfg ${s.cfgId} · Seq ${s.seqId} · ${s.total} pkts / ${s.interval} s`,
 };
 
 const snap = {};   // section -> field values as last saved (undefined = never saved)
-const valuesOf = sec => Object.fromEntries(SECTIONS[sec].fields.map(k => [k, $(k).value]));
-const isDirty = sec => !snap[sec] || SECTIONS[sec].fields.some(k => snap[sec][k] !== $(k).value);
+const valuesOf = sec => Object.fromEntries(SECTIONS[sec].fields.map(k => [k, getF(k)]));
+const isDirty = sec => !snap[sec] || SECTIONS[sec].fields.some(k => snap[sec][k] !== getF(k));
 const setOpen = (sec, open) => { $('sec-' + sec).open = open; };
 
 function updateSection(sec) {
@@ -408,7 +449,7 @@ function saveSection(sec) {
 }
 function loadCfg() {
   const c = readStored();
-  ALL_FIELDS.forEach(k => { if (c[k] !== undefined) $(k).value = c[k]; });
+  ALL_FIELDS.forEach(k => { if (c[k] !== undefined) setF(k, c[k]); });
   syncDr();
   for (const sec of Object.keys(SECTIONS)) {
     const complete = SECTIONS[sec].fields.every(k => c[k] !== undefined || OPTIONAL_FIELDS.has(k));
@@ -424,8 +465,37 @@ for (const sec of Object.keys(SECTIONS)) {
   SECTIONS[sec].fields.forEach(k => $(k).addEventListener('input', () => { clearErr(sec); updateSection(sec); }));
 }
 $('txpDbm').addEventListener('input', updateTxpHint);
+
+// P2P mode swaps which inputs apply: Region only drives AT+BAND (LoRaWAN), Frequency and FCnt only exist in P2P.
+// refreshUi() calls this too, because it re-enables every field when a run ends.
+const DR_HINT = $('drHint').textContent;
+function applyMode(running = false) {
+  const p2p = $('p2p').checked;
+  $('region').disabled = running || p2p;
+  $('freq').disabled = running || !p2p;
+  $('fcnt').disabled = running || !p2p;
+  $('p2pNote').hidden = !p2p;
+  $('txpDbm').min = p2p ? P2P_TXP_MIN : TXP_DBM[TXP_DBM.length - 1];   // the up/down arrows follow the mode's range
+  $('txpDbm').max = p2p ? P2P_TXP_MAX : TXP_DBM[0];
+  $('drHint').textContent = p2p
+    ? 'P2P: the module does not apply LoRaWAN data-rate limits, so any of these can be sent (DR0 and DR1 are SF12/SF11). The list stays at LoRaWAN data rates so the network server accepts the uplink. The gateway must be able to receive the one you pick.'
+    : DR_HINT;
+  updateTxpHint();
+}
+$('p2p').addEventListener('change', () => { clearErr('radio'); applyMode(); });
+// After a run in P2P mode the box holds the next unused FCnt. It is stored like a saved value, so it does not
+// show up as an unsaved change.
+function advanceFcnt(next) {
+  if (!$('p2p').checked || next > FCNT_MAX) return;
+  $('fcnt').value = next;
+  if (snap.radio && snap.radio.p2p === '1') {
+    snap.radio.fcnt = String(next);
+    try { localStorage.setItem(STORE_CFG, JSON.stringify({ ...readStored(), fcnt: String(next) })); } catch {}
+  }
+  updateSection('radio');
+}
 loadCfg();
-updateTxpHint();
+applyMode();
 
 /* ================= floor level + location (per spot, outside the saved sections) ================= */
 function clearSpotErr(id) { $(id + 'Err').textContent = ''; $(id).removeAttribute('aria-invalid'); }
@@ -495,6 +565,7 @@ function refreshUi() {
   $('rawSend').disabled = !idle;
   $('devReset').disabled = !idle;
   [...ALL_FIELDS, 'dr', 'loc', 'floor', 'floorUp', 'floorDown'].forEach(k => $(k).disabled = running);
+  applyMode(running);
   document.querySelectorAll('button.save').forEach(b => b.disabled = running);
   $('sum-conn').textContent = connected ? `Connected: ${dev && dev.name || ''}` : 'Not connected';
 }
@@ -514,8 +585,23 @@ function onNotify(e) {
     if (line) onLine(line);
   }
 }
+// Asynchronous module events (for example "+EVT:TXP2P DONE") are not replies to a command. Arm the waiter
+// before sending the command: the event can arrive right behind the OK.
+const evWaiters = new Set();
+function armEvent(text, ms) {
+  const w = { text };
+  w.promise = new Promise((resolve, reject) => {
+    const t = setTimeout(() => { evWaiters.delete(w); reject(new Error(`timeout waiting for ${text}`)); }, ms);
+    w.resolve = () => { clearTimeout(t); evWaiters.delete(w); resolve(); };
+    w.reject = e => { clearTimeout(t); evWaiters.delete(w); reject(e); };
+  });
+  w.promise.catch(() => {});      // no unhandled rejection when the command failed and nobody awaits it
+  evWaiters.add(w);
+  return w;
+}
 function onLine(line) {
   log(`< ${line}\n`);
+  for (const w of [...evWaiters]) if (line.includes(w.text)) w.resolve();
   if (!pending) return;
   if (line === 'OK') pending.done(true);
   else if (/^AT_/.test(line)) { pending.lines.push(line); pending.done(false); }
@@ -539,7 +625,9 @@ function cmd(c, timeout = 5000) {
 
 /* ================= connection ================= */
 function onDisconnected() {
-  rx = null; connected = false; stopFlag = true; setupSig = null;
+  rx = null; connected = false; setupSig = null;
+  if (!expectDisconnect) stopFlag = true;     // an expected drop (reset, mode switch) must not end a run
+  evWaiters.forEach(w => w.reject(new Error('disconnected')));
   if (pending) pending.done(false);
   wakeAll(); refreshUi(); log('[disconnected]\n');
   if (expectDisconnect) return;
@@ -616,8 +704,6 @@ function getterValue(lines, at) {
 function devNote(text, kind = '') { const n = $('devNote'); n.textContent = text; n.className = kind; }
 function clearDev() { devNote(''); }
 
-const P2P_MSG = 'The module is in P2P mode (AT+NWM=0), so the LoRaWAN settings are not available. Send AT+NWM=1 in Debug (the module reboots), reconnect, then try again.';
-
 const wait = ms => new Promise(r => setTimeout(r, ms));   // unlike sleep(), a disconnect does not cut it short
 async function waitFor(pred, ms) {
   const t0 = Date.now();
@@ -639,6 +725,33 @@ async function reconnect(ms) {
     await wait(1500);
   }
   return false;
+}
+
+// Put the module in the wanted network mode: '1' = LoRaWAN, '0' = P2P LoRa. Switching reboots the module (it
+// drops Bluetooth), so reconnect to the same device afterwards. Throws when it cannot be done.
+async function ensureMode(want) {
+  const name = want === '0' ? 'P2P' : 'LoRaWAN';
+  const cur = getterValue(await cmd('AT+NWM=?'), 'AT+NWM');
+  if (cur === want) return;
+  if (cur === undefined) throw new Error('could not read the network mode (AT+NWM=?)');
+  log(`[mode] AT+NWM is ${cur}, switching to ${name} (the module reboots)\n`);
+  setStatus(`Switching the module to ${name} mode…`, 'busy');
+  const was = expectDisconnect; expectDisconnect = true;
+  try {
+    let accepted = false, err = '';
+    try { await cmd(`AT+NWM=${want}`, 8000); accepted = true; } catch (e) { err = e.message; }
+    const dropped = await waitFor(() => !connected, accepted ? 6000 : 3000);
+    if (!dropped && !accepted) throw new Error(`AT+NWM=${want} was not accepted (${err})`);
+    setupSig = null;
+    if (dropped) {
+      setStatus(`Module restarting in ${name} mode, reconnecting…`, 'busy');
+      if (!(await reconnect(25000))) throw new Error('could not reconnect after the mode switch');
+    } else log('[mode] AT+NWM accepted but Bluetooth stayed up (no restart observed)\n');
+    if (!(await probe())) throw new Error('the module does not answer AT after the mode switch');
+    const now = getterValue(await cmd('AT+NWM=?'), 'AT+NWM');
+    if (now !== want) throw new Error(`the module reports AT+NWM=${now} after the switch, expected ${want}`);
+    log(`[mode] now ${name}\n`);
+  } finally { expectDisconnect = was; }
 }
 
 async function resetDevice() {
@@ -663,12 +776,15 @@ async function resetDevice() {
     let nwm;
     try { nwm = getterValue(await cmd('AT+NWM=?'), 'AT+NWM'); } catch (e) { nwm = undefined; log(`[reset] AT+NWM=? failed: ${e.message}\n`); }
     const secs = Math.round((Date.now() - t0) / 1000);
-    const problem = nwm === '1' ? '' : nwm === '0' ? P2P_MSG : 'could not confirm LoRaWAN mode (AT+NWM must be 1)';
-    if (problem) {
-      const msg = `Reset sent, but: ${problem}`;
+    // either network mode is fine: the next Start switches the module to the mode selected on this page
+    if (nwm !== '0' && nwm !== '1') {
+      const msg = 'Reset sent, but could not read the network mode (AT+NWM=?)';
       log(`[reset] ${msg}\n`); devNote(msg, 'err'); setStatus(msg, 'err'); buzz([300, 100, 300]);
     } else {
-      const msg = `Reset OK in ${secs} s: the module answers and is in LoRaWAN mode. Setup is re-applied on the next Start.`;
+      const have = nwm === '0' ? 'P2P' : 'LoRaWAN', want = $('p2p').checked ? 'P2P' : 'LoRaWAN';
+      const msg = `Reset OK in ${secs} s: the module answers and is in ${have} mode.` +
+        (have === want ? '' : ` This page is set to ${want}, so the next Start switches the module (it reboots).`) +
+        ' Setup is re-applied on the next Start.';
       log(`[reset] ${msg}\n`); devNote(msg, 'ok'); setStatus(msg, 'ok'); buzz(400);
     }
   } catch (e) {
@@ -690,6 +806,83 @@ function unlockScreen() { if (wakeLock) { wakeLock.release().catch(() => {}); wa
 // the browser drops the lock when the tab is hidden; take it again when the page comes back mid-run
 document.addEventListener('visibilitychange', () => { if (running && document.visibilityState === 'visible') lockScreen(); });
 
+/* ================= LoRaWAN frame builder (P2P mode) ================= */
+// <lorawan-builder> (src/web_control/test/ extracts this block between the markers)
+// Port of docs/LoRaWANUplinkBuilder.c, cut down to what the tester sends: an unconfirmed ABP uplink in the
+// LoRaWAN 1.0.x format (the MIC and keystream blocks are the 1.0.x ones; a 1.1 device profile would reject them),
+// no FOpts. AES is Web Crypto: AES-CBC with a zero IV over one block equals AES-ECB (the PKCS7 block is dropped).
+const aesKeys = new Map();   // key hex -> CryptoKey
+const hexBytes = h => Uint8Array.from(h.match(/../g) || [], b => parseInt(b, 16));
+const bytesHex = b => [...b].map(x => x.toString(16).padStart(2, '0')).join('').toUpperCase();
+async function aesBlock(keyHex, block) {
+  let k = aesKeys.get(keyHex);
+  if (!k) { k = await crypto.subtle.importKey('raw', hexBytes(keyHex), 'AES-CBC', false, ['encrypt']); aesKeys.set(keyHex, k); }
+  const out = await crypto.subtle.encrypt({ name: 'AES-CBC', iv: new Uint8Array(16) }, k, block);
+  return new Uint8Array(out, 0, 16);
+}
+const putLe32 = (a, pos, v) => { for (let i = 0; i < 4; i++) a[pos + i] = (v >>> (8 * i)) & 0xff; };
+function cmacSubkey(b) {
+  const o = new Uint8Array(16);
+  for (let i = 0; i < 15; i++) o[i] = ((b[i] << 1) | (b[i + 1] >> 7)) & 0xff;
+  o[15] = (b[15] << 1) & 0xff;
+  if (b[0] & 0x80) o[15] ^= 0x87;
+  return o;
+}
+async function aesCmac(keyHex, data) {   // RFC 4493
+  const k1 = cmacSubkey(await aesBlock(keyHex, new Uint8Array(16)));
+  const k2 = cmacSubkey(k1);
+  const complete = data.length > 0 && data.length % 16 === 0;
+  const n = Math.max(1, Math.ceil(data.length / 16));
+  let x = new Uint8Array(16);
+  for (let i = 0; i + 1 < n; i++) x = await aesBlock(keyHex, x.map((v, j) => v ^ data[i * 16 + j]));
+  const off = (n - 1) * 16, rem = data.length - off;
+  const last = new Uint8Array(16);
+  if (complete) { for (let j = 0; j < 16; j++) last[j] = data[off + j] ^ k1[j]; }
+  else { last.set(data.subarray(off, off + rem)); last[rem] = 0x80; for (let j = 0; j < 16; j++) last[j] ^= k2[j]; }
+  return aesBlock(keyHex, x.map((v, j) => v ^ last[j]));
+}
+// devAddr / nwkSKey / appSKey: hex strings (DevAddr as typed, big-endian: 26011BDA goes on air as DA 1B 01 26).
+// fcnt: 0..0xFFFFFFFF (only the low 16 bits are sent; all 32 bits go into the keystream and the MIC).
+// Returns the whole PHY payload as a Uint8Array.
+async function lorawanUplink({ devAddr, nwkSKey, appSKey, fcnt, fport, payload }) {
+  if (!isHex(devAddr, 8) || !isHex(nwkSKey, 32) || !isHex(appSKey, 32)) throw new Error('DevAddr/keys must be 8/32/32 hex characters');
+  if (!Number.isInteger(fcnt) || fcnt < 0 || fcnt > 0xFFFFFFFF) throw new Error('FCnt must be 0..4294967295');
+  const hasPayload = payload.length > 0;
+  if (hasPayload && !(Number.isInteger(fport) && fport >= 1 && fport <= 223)) throw new Error('FPort must be 1-223');
+  const msgLen = 1 + 4 + 1 + 2 + (hasPayload ? 1 + payload.length : 0);
+  if (msgLen > 255) throw new Error('frame too long');
+  const addr = parseInt(devAddr, 16) >>> 0;
+  const out = new Uint8Array(msgLen + 4);
+  let pos = 0;
+  out[pos++] = 0x40;                              // MHDR: unconfirmed uplink, major 0
+  putLe32(out, pos, addr); pos += 4;
+  out[pos++] = 0x00;                              // FCtrl: ADR off, no ACK, no FOpts
+  out[pos++] = fcnt & 0xff; out[pos++] = (fcnt >>> 8) & 0xff;
+  if (hasPayload) {
+    out[pos++] = fport;
+    for (let i = 0; i < payload.length; i += 16) {   // FRMPayload, AppSKey, block counter from 1
+      const A = new Uint8Array(16);
+      A[0] = 0x01; putLe32(A, 6, addr); putLe32(A, 10, fcnt); A[15] = i / 16 + 1;   // A[5] = 0: uplink
+      const S = await aesBlock(appSKey, A);
+      for (let j = 0; j < Math.min(16, payload.length - i); j++) out[pos + i + j] = payload[i + j] ^ S[j];
+    }
+    pos += payload.length;
+  }
+  const b = new Uint8Array(16 + msgLen);          // B0 | msg
+  b[0] = 0x49; putLe32(b, 6, addr); putLe32(b, 10, fcnt); b[15] = msgLen;   // b[5] = 0: uplink
+  b.set(out.subarray(0, msgLen), 16);
+  out.set((await aesCmac(nwkSKey, b)).subarray(0, 4), pos);
+  return out;
+}
+// Time on air in ms: preamble 8, explicit header, CRC on, CR 4/5, low data rate optimisation when a symbol is over 16 ms.
+function loraAirtimeMs(sf, bwKhz, bytes) {
+  const tsym = (2 ** sf) / bwKhz;                 // ms
+  const de = tsym > 16 ? 1 : 0;
+  const n = 8 + Math.max(Math.ceil((8 * bytes - 4 * sf + 28 + 16) / (4 * (sf - 2 * de))) * 5, 0);
+  return (8 + 4.25 + n) * tsym;
+}
+// </lorawan-builder>
+
 /* ================= test run ================= */
 function readParams() {
   const p = { ...VALIDATE.keys(), ...VALIDATE.radio(), ...VALIDATE.test() };
@@ -699,6 +892,12 @@ function readParams() {
     throw new FieldError('floor', `Floor level must be 0-${FLOOR_MAX}`);
   p.loc = $('loc').value;
   if (!/^[\x21-\x7e]{3}$/.test(p.loc)) throw new FieldError('loc', 'Location ID must be exactly 3 printable ASCII characters');
+  if (p.p2p) {
+    p.airMs = loraAirtimeMs(p.sf, p.bw, FRAME_BYTES);
+    if (p.interval * 1000 < p.airMs + 250)
+      throw new FieldError('interval', `Interval ${p.interval} s is too short for SF${p.sf}/${p.bw} kHz (airtime ${Math.round(p.airMs)} ms); use at least ${Math.ceil((p.airMs + 250) / 1000)} s`);
+    if (p.fcnt + p.total - 1 > FCNT_MAX) throw new FieldError('fcnt', `FCnt would pass ${FCNT_MAX} during this run; lower the starting FCnt or the packet count`);
+  }
   return p;
 }
 
@@ -724,9 +923,7 @@ function setProgress(n, total) {
 
 async function runSetup(p) {
   log('[setup]\n');
-  const nwm = await cmd('AT+NWM=?').catch(() => []);
-  if (getterValue(nwm, 'AT+NWM') === '0')
-    throw new Error('Device is in P2P mode. Set AT+NWM=1 (this reboots the device), reconnect, then retry');
+  await ensureMode('1');
   await cmd('AT+NJM=0');                        // ABP
   await cmd('AT+CLASS=A');
   await cmd(`AT+BAND=${p.region.band}`);
@@ -738,6 +935,56 @@ async function runSetup(p) {
   await cmd(`AT+DR=${p.dr}`);
   await cmd(`AT+TXP=${p.txp}`);
   log('[setup done]\n');
+}
+
+// P2P setup. The module does not see the ABP keys: the page builds the whole LoRaWAN frame.
+// Each setting is [long name, older short name, value, how to compare the read-back]. The page tries the long
+// name and falls back to the short one when the module does not know the command (AT_ERROR). Unverified on a unit.
+async function runSetupP2P(p) {
+  log('[setup p2p]\n');
+  await ensureMode('0');
+  const settings = [   // [long name, short name, value, radix of the value]
+    ['SYNCWORD',         'SYNCWORD', SYNCWORD,                  16],   // LoRaWAN public sync word
+    ['RFFREQUENCY',      'PFREQ',    String(p.freqHz),          10],
+    ['SPREADINGFACTOR',  'PSF',      String(p.sf),              10],
+    ['BANDWIDTH',        'PBW',      String(P2P_BW_CODE[p.bw]), 10],
+    ['CODINGRATE',       'PCR',      '0',                       10],   // 4/5, as LoRaWAN
+    ['PREAMBLELENGTH',   'PPL',      String(P2P_PREAMBLE),      10],
+    ['TXOUTPUTPOWER',    'PTP',      String(p.dbm),             10],
+    ['IQINVER',          'IQINVER',  '0',                       10],   // uplinks are not IQ inverted
+    ['ENCRY',            'ENCRY',    '0',                       10],   // the LoRaWAN frame carries its own encryption
+    ['CAD',              'CAD',      '0',                       10],
+    ['FIXLENGTHPAYLOAD', 'FIXLENGTHPAYLOAD', '0',               10],   // explicit header, like LoRaWAN
+  ];
+  for (const [long, short, value, radix] of settings) {
+    let name = long;
+    try { await cmd(`AT+${long}=${value}`); }
+    catch (e) {
+      if (long === short || !/AT_ERROR/.test(e.message)) throw e;
+      log(`[setup p2p] AT+${long} not known, trying AT+${short}\n`);
+      name = short; await cmd(`AT+${short}=${value}`);
+    }
+    // read it back: a value the module did not take would silently ruin the coverage data
+    let got;
+    try { got = getterValue(await cmd(`AT+${name}=?`), `AT+${name}`); } catch (e) { log(`[setup p2p] read-back of AT+${name} failed: ${e.message}\n`); continue; }
+    const digits = got === undefined ? '' : got.replace(/^0x/i, '');
+    if (!(radix === 16 ? /^[0-9a-fA-F]+$/ : /^\d+$/).test(digits)) { log(`[setup p2p] AT+${name} read-back not understood: ${got}\n`); continue; }
+    if (parseInt(digits, radix) !== parseInt(value, radix)) throw new Error(`AT+${name} reads back ${got}, expected ${value}`);
+  }
+  log('[setup p2p done]\n');
+}
+
+// One P2P frame: AT+PSEND answers OK when it accepts the frame and "+EVT:TXP2P DONE" when the radio is finished.
+// A frame that was accepted but never reported DONE is sent again with the same FCnt.
+async function sendP2PWithRetry(frameHex, airMs) {
+  let lastErr;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (stopFlag) return false;
+    const done = armEvent('+EVT:TXP2P DONE', airMs * 1.5 + 4000);
+    try { await cmd(`AT+PSEND=${frameHex}`, 8000); await done.promise; return true; }
+    catch (e) { done.reject(e); lastErr = e; log(`[send failed ${attempt}/3] ${e.message}\n`); if (!connected) return false; await sleep(3000); }
+  }
+  throw lastErr;
 }
 
 async function sendWithRetry(hex, fport) {
@@ -780,19 +1027,29 @@ async function startTest() {
   let sent = 0;
   try {
     // setup only when something changed since the last run on this connection
-    const sig = JSON.stringify([p.devaddr, p.nwkskey, p.appskey, p.region.band, p.dr, p.txp]);   // txp = AT+TXP index
+    // (txp = AT+TXP index; in P2P mode the module never sees the keys, FPort or FCnt, so they are not part of it)
+    const sig = JSON.stringify(p.p2p ? ['p2p', p.freqHz, p.sf, p.bw, p.dbm]
+                                     : [p.devaddr, p.nwkskey, p.appskey, p.region.band, p.dr, p.txp]);
     if (sig !== setupSig) {
       setupSig = null;
       setStatus('Configuring device…', 'busy');
-      await runSetup(p);
+      await (p.p2p ? runSetupP2P(p) : runSetup(p));
       setupSig = sig;
     } else log('[setup skipped: unchanged since the last run]\n');
+    if (p.p2p) log(`[p2p] ${p.freqHz} Hz SF${p.sf}/${p.bw} kHz ${p.dbm} dBm, FCnt from ${p.fcnt}, airtime ~${Math.round(p.airMs)} ms\n`);
     for (let n = 0; n < p.total; n++) {
       if (stopFlag) break;
       const hex = buildPayload(p, n);
-      log(`[tx ${n + 1}/${p.total}] ${hex}\n`);
       setStatus(`Sending ${n + 1} / ${p.total} at ${p.loc}`, 'busy');
-      if (!(await sendWithRetry(hex, p.fport))) break;
+      if (p.p2p) {
+        const fcnt = p.fcnt + n;       // +1 after each uplink that was sent
+        const frame = bytesHex(await lorawanUplink({ devAddr: p.devaddr, nwkSKey: p.nwkskey, appSKey: p.appskey, fcnt, fport: p.fport, payload: hexBytes(hex) }));
+        log(`[tx ${n + 1}/${p.total}] fcnt=${fcnt} payload=${hex} frame=${frame}\n`);
+        if (!(await sendP2PWithRetry(frame, p.airMs))) break;
+      } else {
+        log(`[tx ${n + 1}/${p.total}] ${hex}\n`);
+        if (!(await sendWithRetry(hex, p.fport))) break;
+      }
       sent = n + 1; setProgress(sent, p.total);
       if (n < p.total - 1) {
         setStatus(`Sent ${sent} / ${p.total} at ${p.loc}, next in ${p.interval} s`, 'busy');
@@ -814,6 +1071,7 @@ async function startTest() {
     setStatus(`Aborted after ${sent} / ${p.total}: ${e.message}`, 'err'); buzz([300, 100, 300]);
   } finally {
     running = false; unlockScreen(); refreshUi();
+    if (p.p2p && sent > 0) { advanceFcnt(p.fcnt + sent); log(`[p2p] next FCnt ${p.fcnt + sent}\n`); }
     if (!connected) setOpen('conn', true);
   }
 }
