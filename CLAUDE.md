@@ -18,6 +18,7 @@ elsewhere and are out of scope.
 - `docs/rak_rui3_at_commands.txt` - RUI3 AT command reference (full list, including `AT+BAND` indices). Not an app input; just reference.
 - `docs/LoRaWANUplinkBuilder.c` - C reference for the LoRaWAN uplink frame builder. The page's JS builder is a port of it. Reference only (its trailing usage snippet is not compilable).
 - `docs/p2p_mode_run_log.md` - log of the unattended run that added P2P mode (decisions, results, what is still unverified). `docs/p2p_bench_checklist.md` - the hardware and network checks that run could not do.
+- `tools/stamp_version.mjs` - rewrites the footer Version and Modified date in `index.html`. `.githooks/pre-commit` runs it (see "Version and modified date").
 - `src/web_control/test/` - tests, not served by the container: `builder.test.mjs` (Node, frame builder vs golden frames), `page_harness.html` (page vs a fake RAK11720, in a browser over http). See its README.
 
 ## Fixed test constraints (do not change)
@@ -60,6 +61,16 @@ elsewhere and are out of scope.
 - Per-spot inputs sit outside the saved sections. Location ID is deliberately not persisted. Floor level (0-255, stepper, payload byte 13) is persisted, starts empty, and Start requires it.
 - Device section (`resetDevice`): one **Reset** button, which sends `ATR` after a confirm and expects the module to drop BLE, reconnects the same device (retries for 25 s, `AT` probe), then verifies with `AT+NWM=?` (0 or 1 are both fine: the message says which mode the module is in and whether the next Start will switch it to the mode selected on the page). A getter replies `AT+NWM=1` then `OK` (verified on RUI_4.3.0_RAK11720), parsed by `getterValue()`, which `ensureMode()` and the P2P read-backs also use. Reset sets `setupSig = null`, so the next Start re-runs the setup. It is disabled while a run or another reset is going (`busy`). It has only been tested against an in-browser fake module (boot banner, timeouts, reboot with and without `OK`, no reboot, failed reconnect, NWM=0), not a real unit.
 - Connection: known devices first, then a name/prefix box, one Scan button (empty box = list all devices, otherwise a `namePrefix` filter), then Disconnect. The box value is remembered.
+
+## Version and modified date
+
+- The page footer shows `Version x.y.z`, `Modified YYYY-MM-DD`, author `nguyenmanhthao996tn` and `TTLab Research Group, FCE, UIT`. Version and date live only in `<span id="appVersion">` and `<span id="appModified">` in `index.html`; that file is the single source of truth.
+- **Never edit those two spans by hand to "update" them.** `tools/stamp_version.mjs` does it. The pre-commit hook (`.githooks/pre-commit`) runs `node tools/stamp_version.mjs --auto` whenever `index.html` is in a commit: if the page differs from HEAD (ignoring the stamp) it bumps the patch number and sets the date to today (local), then stages the file.
+- Enable the hook once per clone: `git config core.hooksPath .githooks` (git does not carry hook config in a clone). Needs Node, which the tests already need.
+- Bigger bumps: before committing run `node tools/stamp_version.mjs --bump=minor` (or `--bump=major`, or `--set=x.y.z` for an exact number) and stage the file; the hook keeps a version that already differs from HEAD and only refreshes the date. Use minor for a new user-visible feature, major for a payload or setup change that breaks comparability with earlier runs.
+- **When committing for the user: if `git config core.hooksPath` is not `.githooks`, run `node tools/stamp_version.mjs --auto` and `git add` the page before `git commit`.** Never use `--no-verify`. If the hook refuses because `index.html` has unstaged changes, stage the whole file instead of bypassing it.
+- Changing `index.html` without committing does not change the stamp; that is expected.
+- **Commit id**: the footer shows `Version x.y.z (abc1234)`. The id cannot be stored in the committed `index.html` (it is a hash of that content), so `.githooks/write_commit_id.sh` writes the short `HEAD` id to `src/web_control/www/commit.txt` (git-ignored) from the `post-commit`, `post-merge` and `post-checkout` hooks, and the page fetches it at load. No `commit.txt` (hooks not enabled, `file://`) means nothing is shown. On the LXC, enable the hooks once (`git config core.hooksPath .githooks`, then `sh .githooks/write_commit_id.sh` for the current checkout); after that `git pull` keeps it current and the bind-mounted folder serves it without a container restart. The id is `HEAD` at the last hook run, so uncommitted edits are not reflected. Do not commit `commit.txt` or hard-code an id in the page.
 
 ## Conventions
 

@@ -1,0 +1,16 @@
+#!/bin/sh
+# Keeps the footer Version / Modified date of the web page current.
+# Enable once per clone:  git config core.hooksPath .githooks
+PAGE=src/web_control/www/index.html
+
+# Only when the page is part of this commit.
+git diff --cached --quiet -- "$PAGE" && exit 0
+
+# The hook rewrites the working file and stages it, so it must not hold unstaged edits.
+if ! git diff --quiet -- "$PAGE"; then
+  echo "pre-commit: $PAGE has unstaged changes; stage all of it (or stash the rest) so the footer stamp matches the commit." >&2
+  exit 1
+fi
+
+node tools/stamp_version.mjs --auto || exit 1
+git add -- "$PAGE"

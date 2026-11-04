@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LoRaWAN coverage test</title>
+<title>LoRaWAN Coverage Test</title>
 <style>
   :root { --line:#cfd4da; --ok:#2e7d32; --err:#c62828; --busy:#1565c0; }
   * { box-sizing: border-box; }
@@ -65,10 +65,11 @@
 
   #known > div { display:flex; align-items:center; gap:8px; margin:6px 0; }
   #known span { flex:1; overflow-wrap:anywhere; font-size:14px; }
+  footer { margin:20px 0 0; font-size:12px; line-height:1.5; color:#777; text-align:center; }
   #log { background:#111; color:#0f0; padding:8px; min-height:160px; max-height:320px; overflow:auto; white-space:pre-wrap; font-size:12px; }
 </style>
 
-<h1>LoRaWAN coverage test</h1>
+<h1>LoRaWAN Coverage Test</h1>
 
 <!-- ============ run area: the part used at every spot ============ -->
 <div class="run">
@@ -199,6 +200,13 @@
     <button id="saveLog" class="wide">Save log</button>
   </div>
 </details>
+
+<!-- Version and Modified date are rewritten by tools/stamp_version.mjs (run by the pre-commit hook). Do not edit them by hand. -->
+<footer>
+  <div>Version <span id="appVersion">1.2.0</span><span id="appCommit" hidden></span> &middot; Modified <span id="appModified">2026-11-04</span></div>
+  <div>Author: nguyenmanhthao996tn</div>
+  <div>TTLab Research Group, FCE, UIT</div>
+</footer>
 
 <script>
 /* ================= constants ================= */
@@ -1080,4 +1088,14 @@ $('stop').onclick = () => { stopFlag = true; wakeAll(); };
 
 refreshUi();
 loadKnown();
+
+/* Footer commit id: commit.txt is written next to this page by the git hooks (post-commit /
+   post-merge / post-checkout) and is not in the repo. Absent (file://, hooks not set up): shows nothing. */
+fetch('commit.txt', { cache: 'no-store' })
+  .then(r => r.ok ? r.text() : '')
+  .then(t => {
+    t = t.trim();
+    if (/^[0-9a-f]{7,40}$/.test(t)) { const e = $('appCommit'); e.textContent = ' (' + t + ')'; e.hidden = false; }
+  })
+  .catch(() => {});
 </script>

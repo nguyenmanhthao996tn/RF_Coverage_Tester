@@ -1,0 +1,2 @@
+# Shell hooks must stay LF even when core.autocrlf=true (Windows), or sh fails on "\r".
+.githooks/* text eol=lf
