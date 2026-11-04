@@ -5,9 +5,12 @@ RAK11720 (RUI3) sends numbered ABP uplinks from each spot in the building. The
 operator walks the building, enters the current location by hand, and starts a
 test run from a phone. RSSI/SNR is read at the gateways (ChirpStack, via MQTT).
 
-**Scope of this repo: the tester device firmware and its web control page only.**
-Network server setup, MQTT collection, analysis, heatmaps and floor plans live
-elsewhere and are out of scope.
+**Scope of this repo: the tester device firmware and its web control page.**
+Two planned additions are now in scope (neither is started; see README Todo):
+the floor map of the UIT-E building, and reading results (RSSI/SNR) from the
+network server over MQTT. Network server setup itself, analysis and heatmaps
+stay elsewhere and are out of scope. `docs/floor_planning_png/` already holds
+floor plan images and a grid-overlay prototype page.
 
 ## Layout
 
